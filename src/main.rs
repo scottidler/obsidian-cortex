@@ -40,8 +40,8 @@ fn main() -> Result<()> {
         Command::Daemon(..) => {
             println!("Daemon command not yet implemented (Phase 2)");
         }
-        Command::Migrate(..) => {
-            println!("Migrate command not yet implemented (Phase 1h)");
+        Command::Migrate(opts) => {
+            obsidian_cortex::run_migrate(&vault_root, &config, opts)?;
         }
     }
 

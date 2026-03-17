@@ -3,6 +3,7 @@ pub mod config;
 pub mod frontmatter;
 pub mod links;
 pub mod logging;
+pub mod migrate;
 pub mod naming;
 pub mod report;
 pub mod scope;
@@ -15,7 +16,7 @@ use eyre::Result;
 use std::path::Path;
 use tracing::instrument;
 
-use cli::{LintOpts, StateOpts};
+use cli::{LintOpts, MigrateOpts, StateOpts};
 use config::Config;
 use report::Report;
 use state::VaultManifest;
@@ -156,4 +157,20 @@ pub fn run_state(vault_root: &Path, config: &Config, opts: &StateOpts) -> Result
     }
 
     Ok(())
+}
+
+#[instrument(skip(config, opts), fields(vault_root = %vault_root.display()))]
+pub fn run_migrate(vault_root: &Path, config: &Config, opts: &MigrateOpts) -> Result<Report> {
+    tracing::info!("starting migrate command");
+    let notes = scan_vault(vault_root, &config.vault)?;
+
+    if opts.apply {
+        let count = migrate::apply_migrate(vault_root, &notes, &config.migrations)?;
+        println!("Migrated {count} file(s).");
+        Ok(Report::default())
+    } else {
+        let report = migrate::lint_migrate(&notes, &config.migrations);
+        report.print_human();
+        Ok(report)
+    }
 }

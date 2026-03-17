@@ -99,7 +99,7 @@ fn matches_rule(note: &Note, rule: &crate::config::ScopeRule) -> bool {
 }
 
 /// Insert key-value pairs into frontmatter before the closing ---.
-fn insert_frontmatter_fields(content: &str, fields: &[(String, serde_yaml::Value)]) -> Option<String> {
+pub fn insert_frontmatter_fields(content: &str, fields: &[(String, serde_yaml::Value)]) -> Option<String> {
     let trimmed = content.trim_start();
     if !trimmed.starts_with("---") {
         return None;
