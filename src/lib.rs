@@ -1,3 +1,4 @@
+pub mod broken_links;
 pub mod cli;
 pub mod config;
 pub mod frontmatter;
@@ -57,6 +58,10 @@ pub fn run_lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<R
         } else {
             report.merge(tags::lint_tags(&notes, &config.actions.tags));
         }
+    }
+
+    if rules.contains(&"broken-links") {
+        report.merge(broken_links::lint_broken_links(&notes, &config.actions.broken_links));
     }
 
     if opts.format == "json" {
