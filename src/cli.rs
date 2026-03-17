@@ -5,15 +5,15 @@ use std::process::Command as ProcessCommand;
 /// Generate the after_help text with tool dependency checks and log path.
 pub fn after_help_text() -> String {
     let fabric_status = check_tool("fabric", &["--version"]);
-    let log_dir = dirs::data_local_dir()
+    let log_path = dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("~/.local/share"))
         .join("obsidian-cortex")
         .join("logs")
         .join("obsidian-cortex.log");
 
     format!(
-        "REQUIRED TOOLS:\n  {fabric_status}\n\nLogs: {log_dir}",
-        log_dir = log_dir.display()
+        "REQUIRED TOOLS:\n{fabric_status}\n\nLogs are written to: {log_path}",
+        log_path = log_path.display()
     )
 }
 
@@ -26,9 +26,9 @@ fn check_tool(name: &str, version_args: &[&str]) -> String {
                 .next()
                 .unwrap_or("unknown")
                 .to_string();
-            format!("  {name:<12} {ver}")
+            format!("  \u{2705} {name:<10} {ver}")
         }
-        _ => format!("  {name:<12} NOT FOUND"),
+        _ => format!("  \u{274c} {name:<10} NOT FOUND"),
     }
 }
 
