@@ -2,6 +2,7 @@ pub mod cli;
 pub mod config;
 pub mod duplicates;
 pub mod frontmatter;
+pub mod linking;
 pub mod links;
 pub mod logging;
 pub mod migrate;
@@ -17,7 +18,7 @@ use eyre::Result;
 use std::path::Path;
 use tracing::instrument;
 
-use cli::{LintOpts, MigrateOpts, StateOpts};
+use cli::{LinkOpts, LintOpts, MigrateOpts, StateOpts};
 use config::Config;
 use report::Report;
 use state::VaultManifest;
@@ -171,6 +172,22 @@ pub fn run_migrate(vault_root: &Path, config: &Config, opts: &MigrateOpts) -> Re
         Ok(Report::default())
     } else {
         let report = migrate::lint_migrate(&notes, &config.migrations);
+        report.print_human();
+        Ok(report)
+    }
+}
+
+#[instrument(skip(config, opts), fields(vault_root = %vault_root.display()))]
+pub fn run_link(vault_root: &Path, config: &Config, opts: &LinkOpts) -> Result<Report> {
+    tracing::info!("starting link command");
+    let notes = scan_vault(vault_root, &config.vault)?;
+
+    if opts.apply {
+        let count = linking::apply_linking(vault_root, &notes, &config.actions.linking)?;
+        println!("Inserted wikilinks in {count} file(s).");
+        Ok(Report::default())
+    } else {
+        let report = linking::lint_linking(&notes, &config.actions.linking);
         report.print_human();
         Ok(report)
     }

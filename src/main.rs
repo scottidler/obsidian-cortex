@@ -28,8 +28,8 @@ fn main() -> Result<()> {
         Command::Lint(opts) => {
             obsidian_cortex::run_lint(&vault_root, &config, opts)?;
         }
-        Command::Link(..) => {
-            println!("Link command not yet implemented (Phase 2)");
+        Command::Link(opts) => {
+            obsidian_cortex::run_link(&vault_root, &config, opts)?;
         }
         Command::Intel(..) => {
             println!("Intel command not yet implemented (Phase 2)");
