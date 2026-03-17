@@ -1,0 +1,282 @@
+use eyre::{Context, Result};
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+use tracing::instrument;
+
+use crate::cli::DaemonOpts;
+use crate::config::{Config, DaemonConfig};
+
+/// Run the daemon based on subcommand options.
+#[instrument(skip(config, opts), fields(vault_root = %vault_root.display()))]
+pub fn run_daemon(vault_root: &Path, config: &Config, opts: &DaemonOpts) -> Result<()> {
+    if opts.install {
+        install_systemd_service(vault_root, config)?;
+    } else if opts.uninstall {
+        uninstall_systemd_service()?;
+    } else if opts.status {
+        show_status()?;
+    } else if opts.stop {
+        println!("Send SIGTERM to the running daemon process to stop it.");
+    } else {
+        // Default: start watching (--start or no flags)
+        start_watching(vault_root, config)?;
+    }
+    Ok(())
+}
+
+/// Start filesystem watcher and run actions on changes.
+fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
+    let daemon_config = &config.daemon;
+    let debounce = Duration::from_secs(daemon_config.debounce_secs);
+
+    println!("Starting daemon, watching: {}", vault_root.display());
+    println!(
+        "Debounce: {}s, actions: {}",
+        daemon_config.debounce_secs,
+        daemon_config.on_change.join(", ")
+    );
+
+    let (tx, rx) = mpsc::channel();
+
+    let mut watcher: RecommendedWatcher =
+        notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+            if let Ok(event) = res {
+                let _ = tx.send(event);
+            }
+        })
+        .context("failed to create filesystem watcher")?;
+
+    watcher
+        .watch(vault_root.as_ref(), RecursiveMode::Recursive)
+        .context("failed to watch vault root")?;
+
+    tracing::info!(vault_root = %vault_root.display(), "daemon started");
+
+    let mut last_run = Instant::now() - debounce; // Allow immediate first run
+    let mut pending_changes: Vec<PathBuf> = Vec::new();
+
+    loop {
+        match rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(event) => {
+                if should_process_event(&event, &config.vault.ignore) {
+                    for path in event.paths {
+                        if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                            let relative = path.strip_prefix(vault_root).unwrap_or(&path).to_path_buf();
+                            if !pending_changes.contains(&relative) {
+                                pending_changes.push(relative);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Check if we should flush pending changes
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                tracing::warn!("watcher channel disconnected");
+                break;
+            }
+        }
+
+        // Debounce: run actions if enough time has passed since last run
+        if !pending_changes.is_empty() && last_run.elapsed() >= debounce {
+            tracing::info!(changed_files = pending_changes.len(), "processing changes");
+
+            for path in &pending_changes {
+                println!("  changed: {}", path.display());
+            }
+
+            run_configured_actions(vault_root, config, daemon_config, &pending_changes);
+            pending_changes.clear();
+            last_run = Instant::now();
+        }
+    }
+
+    Ok(())
+}
+
+/// Check if a filesystem event should be processed.
+fn should_process_event(event: &notify::Event, ignore_dirs: &[String]) -> bool {
+    match event.kind {
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {}
+        _ => return false,
+    }
+
+    // Check if any path is in an ignored directory
+    for path in &event.paths {
+        for component in path.components() {
+            let name = component.as_os_str().to_string_lossy();
+            if ignore_dirs.iter().any(|ig| name == *ig) {
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
+/// Run the configured on-change actions.
+fn run_configured_actions(vault_root: &Path, config: &Config, daemon_config: &DaemonConfig, changed_files: &[PathBuf]) {
+    tracing::info!(actions = ?daemon_config.on_change, "running configured actions");
+
+    for action in &daemon_config.on_change {
+        match action.as_str() {
+            "lint" => {
+                let opts = crate::cli::LintOpts {
+                    dry_run: true,
+                    apply: false,
+                    format: "human".to_string(),
+                    rule: Vec::new(),
+                    path: None,
+                };
+                match crate::run_lint(vault_root, config, &opts) {
+                    Ok(report) => {
+                        if !report.is_empty() {
+                            println!("[daemon] lint: {} violation(s)", report.violations.len());
+                        }
+                    }
+                    Err(e) => tracing::error!(error = %e, "lint action failed"),
+                }
+            }
+            "broken-links" => {
+                let notes = match crate::vault::scan_vault(vault_root, &config.vault) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        tracing::error!(error = %e, "failed to scan vault for broken links");
+                        continue;
+                    }
+                };
+                let report = crate::links::lint_broken_links(&notes, &config.actions.broken_links);
+                if !report.is_empty() {
+                    println!("[daemon] broken-links: {} violation(s)", report.violations.len());
+                }
+            }
+            other => {
+                tracing::warn!(action = %other, "unknown daemon action");
+            }
+        }
+    }
+
+    tracing::info!(changed_count = changed_files.len(), "daemon action cycle complete");
+}
+
+/// Install a systemd user service for the daemon.
+fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<()> {
+    let service_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("~/.config"))
+        .join("systemd")
+        .join("user");
+
+    std::fs::create_dir_all(&service_dir).context("failed to create systemd user dir")?;
+
+    let binary = std::env::current_exe().context("failed to get current executable path")?;
+    let vault = vault_root.display();
+
+    let mut config_flag = String::new();
+    if let Some(config_dir) = dirs::config_dir() {
+        let config_path = config_dir.join("obsidian-cortex").join("obsidian-cortex.yml");
+        if config_path.exists() {
+            config_flag = format!(" --config {}", config_path.display());
+        }
+    }
+
+    let log_level = &config.log_level;
+
+    let service = format!(
+        "[Unit]\n\
+         Description=Obsidian Cortex Vault Daemon\n\
+         After=default.target\n\
+         \n\
+         [Service]\n\
+         Type=simple\n\
+         ExecStart={binary}{config_flag} --vault {vault} --log-level {log_level} daemon --start\n\
+         Restart=on-failure\n\
+         RestartSec=5\n\
+         \n\
+         [Install]\n\
+         WantedBy=default.target\n",
+        binary = binary.display(),
+    );
+
+    let service_path = service_dir.join("obsidian-cortex.service");
+    std::fs::write(&service_path, service)?;
+
+    println!("Installed: {}", service_path.display());
+    println!("Run: systemctl --user daemon-reload && systemctl --user enable --now obsidian-cortex");
+
+    Ok(())
+}
+
+/// Uninstall the systemd user service.
+fn uninstall_systemd_service() -> Result<()> {
+    let service_path = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("~/.config"))
+        .join("systemd")
+        .join("user")
+        .join("obsidian-cortex.service");
+
+    if service_path.exists() {
+        std::fs::remove_file(&service_path)?;
+        println!("Removed: {}", service_path.display());
+        println!("Run: systemctl --user daemon-reload");
+    } else {
+        println!("No service file found at {}", service_path.display());
+    }
+
+    Ok(())
+}
+
+/// Show daemon status.
+fn show_status() -> Result<()> {
+    let service_path = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("~/.config"))
+        .join("systemd")
+        .join("user")
+        .join("obsidian-cortex.service");
+
+    if service_path.exists() {
+        println!("Service file: {}", service_path.display());
+        println!("Check status: systemctl --user status obsidian-cortex");
+    } else {
+        println!("Daemon not installed. Run: cortex daemon --install");
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_should_process_event_create() {
+        let event = notify::Event {
+            kind: EventKind::Create(notify::event::CreateKind::File),
+            paths: vec![PathBuf::from("/vault/note.md")],
+            attrs: Default::default(),
+        };
+        assert!(should_process_event(&event, &[]));
+    }
+
+    #[test]
+    fn test_should_process_event_ignores_git() {
+        let event = notify::Event {
+            kind: EventKind::Modify(notify::event::ModifyKind::Data(notify::event::DataChange::Content)),
+            paths: vec![PathBuf::from("/vault/.git/objects/abc")],
+            attrs: Default::default(),
+        };
+        assert!(!should_process_event(&event, &[".git".to_string()]));
+    }
+
+    #[test]
+    fn test_should_process_event_ignores_access() {
+        let event = notify::Event {
+            kind: EventKind::Access(notify::event::AccessKind::Read),
+            paths: vec![PathBuf::from("/vault/note.md")],
+            attrs: Default::default(),
+        };
+        assert!(!should_process_event(&event, &[]));
+    }
+}

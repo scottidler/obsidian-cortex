@@ -37,8 +37,8 @@ fn main() -> Result<()> {
         Command::State(opts) => {
             obsidian_cortex::run_state(&vault_root, &config, opts)?;
         }
-        Command::Daemon(..) => {
-            println!("Daemon command not yet implemented (Phase 2)");
+        Command::Daemon(opts) => {
+            obsidian_cortex::daemon::run_daemon(&vault_root, &config, opts)?;
         }
         Command::Migrate(opts) => {
             obsidian_cortex::run_migrate(&vault_root, &config, opts)?;

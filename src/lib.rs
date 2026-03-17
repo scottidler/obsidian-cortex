@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod config;
+pub mod daemon;
 pub mod duplicates;
 pub mod frontmatter;
 pub mod intel;
