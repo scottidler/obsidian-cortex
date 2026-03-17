@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod config;
+pub mod frontmatter;
 pub mod logging;
 pub mod naming;
 pub mod report;
@@ -38,6 +39,14 @@ pub fn run_lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<R
             naming::apply_naming(vault_root, &notes, &config.actions.naming)?;
         } else {
             report.merge(naming::lint_naming(&notes, &config.actions.naming));
+        }
+    }
+
+    if rules.contains(&"frontmatter") {
+        if opts.apply {
+            frontmatter::apply_frontmatter(vault_root, &notes, &config.actions.frontmatter)?;
+        } else {
+            report.merge(frontmatter::lint_frontmatter(&notes, &config.actions.frontmatter));
         }
     }
 
