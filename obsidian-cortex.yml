@@ -1,0 +1,96 @@
+vault:
+  # root-path: ~/path/to/vault
+  ignore:
+    - ".git"
+    - ".obsidian"
+    - ".cortex"
+    - "assets"
+    - "attachments"
+  protected: []
+
+log-level: info
+
+actions:
+  naming:
+    style: lowercase-hyphenated
+    max-length: 80
+    exempt-patterns:
+      - "^[\\p{Emoji}].*/$"
+
+  frontmatter:
+    required: [title, date, type, tags]
+    type-fields:
+      video: [source, channel, url]
+      meeting: [scope, company, attendees]
+      article: [source, author]
+      research: [source]
+      book: [author]
+      link: [url]
+    auto-title: true
+
+  tags:
+    style: lowercase-hyphenated
+    canonical:
+      - ai-llm
+      - sre
+      - kubernetes
+      - football
+      - obsidian
+      - rust
+      - python
+      - nixos
+      - writing
+      - music
+      - spanish
+    aliases:
+      ai: ai-llm
+      ML: ai-llm
+      ml: ai-llm
+      k8s: kubernetes
+      kube: kubernetes
+      nix: nixos
+
+  scope:
+    rules:
+      - match: { tags: [sre, dat, tatari, engprog] }
+        set: { scope: work, company: tatari }
+      - match: { source-contains: "granola" }
+        set: { scope: work, confidential: true }
+
+  linking:
+    scan-for: [people, projects, concepts]
+    entities:
+      people: []
+      projects: []
+
+  intel:
+    daily-note: true
+    weekly-review: true
+    fabric-patterns: [extract_wisdom, summarize]
+    output-path: "System/ai-output"
+
+  duplicates:
+    threshold: 0.85
+    same-type-only: false
+
+  broken-links:
+    check-wikilinks: true
+    check-urls: false
+
+state:
+  cache-dir: ".cortex"
+
+daemon:
+  on-change:
+    - lint
+    - broken-links
+  debounce-secs: 5
+  watch: notify
+  poll-interval: 300
+
+migrations: []
+
+llm:
+  provider: claude
+  model: claude-sonnet-4-6
+  api-key: ANTHROPIC_API_KEY

@@ -1,0 +1,117 @@
+pub mod cli;
+pub mod config;
+pub mod logging;
+pub mod report;
+pub mod state;
+
+use colored::Colorize;
+use eyre::Result;
+use std::path::Path;
+use tracing::instrument;
+
+use cli::{LintOpts, StateOpts};
+use config::Config;
+use report::Report;
+use state::VaultManifest;
+
+#[instrument(skip(config, opts), fields(vault_root = %vault_root.display()))]
+pub fn run_lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<Report> {
+    tracing::info!("starting lint run");
+    let manifest = VaultManifest::scan(vault_root, &config.vault.ignore)?;
+    tracing::info!(file_count = manifest.files.len(), "vault scanned");
+
+    let report = Report::default();
+
+    // Lint rules will be added in subsequent phases
+    let rules: Vec<&str> = if opts.rule.is_empty() {
+        vec!["naming", "frontmatter", "tags", "scope", "broken-links"]
+    } else {
+        opts.rule.iter().map(|s| s.as_str()).collect()
+    };
+
+    tracing::info!(?rules, "running lint rules");
+
+    if opts.format == "json" {
+        report.print_json()?;
+    } else {
+        report.print_human();
+    }
+
+    Ok(report)
+}
+
+#[instrument(skip(config, opts), fields(vault_root = %vault_root.display()))]
+pub fn run_state(vault_root: &Path, config: &Config, opts: &StateOpts) -> Result<()> {
+    tracing::info!("starting state command");
+    let cache_dir = &config.state.cache_dir;
+    let manifest_path = VaultManifest::manifest_path(vault_root, cache_dir);
+
+    if opts.refresh || opts.diff {
+        let current = VaultManifest::scan(vault_root, &config.vault.ignore)?;
+
+        if opts.diff {
+            if manifest_path.exists() {
+                let previous = VaultManifest::load(&manifest_path)?;
+                let diff = previous.diff(&current);
+
+                if diff.has_changes() {
+                    if !diff.added.is_empty() {
+                        println!("{}", "Added:".green().bold());
+                        for p in &diff.added {
+                            println!("  + {}", p.display());
+                        }
+                    }
+                    if !diff.removed.is_empty() {
+                        println!("{}", "Removed:".red().bold());
+                        for p in &diff.removed {
+                            println!("  - {}", p.display());
+                        }
+                    }
+                    if !diff.modified.is_empty() {
+                        println!("{}", "Modified:".yellow().bold());
+                        for p in &diff.modified {
+                            println!("  ~ {}", p.display());
+                        }
+                    }
+                    println!(
+                        "\n{}: {} added, {} removed, {} modified",
+                        "Summary".bold(),
+                        diff.added.len(),
+                        diff.removed.len(),
+                        diff.modified.len()
+                    );
+                } else {
+                    println!("{}", "No changes since last scan.".green());
+                }
+            } else {
+                println!("{}", "No previous manifest found. Run with --refresh first.".yellow());
+            }
+        }
+
+        if opts.refresh {
+            current.save(&manifest_path)?;
+            println!(
+                "{} manifest saved ({} files)",
+                "Refreshed:".green().bold(),
+                current.files.len()
+            );
+        }
+    } else {
+        // Default: show current manifest info
+        if manifest_path.exists() {
+            let manifest = VaultManifest::load(&manifest_path)?;
+            println!(
+                "Last scan: {} ({} files)",
+                manifest.timestamp.format("%Y-%m-%d %H:%M:%S UTC"),
+                manifest.files.len()
+            );
+        } else {
+            println!(
+                "{}",
+                "No manifest found. Run `cortex state --refresh` to create one.".yellow()
+            );
+        }
+    }
+
+    Ok(())
+}
