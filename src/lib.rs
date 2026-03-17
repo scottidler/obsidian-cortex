@@ -2,6 +2,7 @@ pub mod cli;
 pub mod config;
 pub mod daemon;
 pub mod duplicates;
+pub mod fabric;
 pub mod frontmatter;
 pub mod intel;
 pub mod linking;
@@ -29,7 +30,16 @@ use vault::scan_vault;
 #[instrument(skip(config, opts), fields(vault_root = %vault_root.display()))]
 pub fn run_lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<Report> {
     tracing::info!("starting lint run");
-    let notes = scan_vault(vault_root, &config.vault)?;
+    let all_notes = scan_vault(vault_root, &config.vault)?;
+
+    // Apply --path glob filter if provided
+    let notes: Vec<_> = if let Some(ref pattern) = opts.path {
+        let glob = glob::Pattern::new(pattern).map_err(|e| eyre::eyre!("invalid glob pattern '{}': {}", pattern, e))?;
+        all_notes.into_iter().filter(|n| glob.matches_path(&n.path)).collect()
+    } else {
+        all_notes
+    };
+
     tracing::info!(note_count = notes.len(), "vault scanned");
 
     let mut report = Report::default();
@@ -76,6 +86,10 @@ pub fn run_lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<R
 
     if rules.contains(&"broken-links") {
         report.merge(links::lint_broken_links(&notes, &config.actions.broken_links));
+    }
+
+    if rules.contains(&"duplicates") {
+        report.merge(duplicates::lint_duplicates(&notes, &config.actions.duplicates));
     }
 
     if opts.format == "json" {

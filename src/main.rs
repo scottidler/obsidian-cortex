@@ -2,15 +2,17 @@
 #![deny(dead_code)]
 #![deny(unused_variables)]
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use eyre::{Context, Result};
 
-use obsidian_cortex::cli::{Cli, Command};
+use obsidian_cortex::cli::{self, Cli, Command};
 use obsidian_cortex::config::Config;
 use obsidian_cortex::logging;
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    // Augment clap with runtime after_help (tool checks + log path) before parsing
+    let matches = Cli::command().after_help(cli::after_help_text()).get_matches();
+    let cli = Cli::from_arg_matches(&matches).context("failed to parse arguments")?;
 
     // Load config first (needed for log level resolution)
     let config = Config::load(cli.config.as_ref()).context("failed to load configuration")?;

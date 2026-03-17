@@ -153,6 +153,40 @@ fn run_configured_actions(vault_root: &Path, config: &Config, daemon_config: &Da
                     println!("[daemon] broken-links: {} violation(s)", report.violations.len());
                 }
             }
+            "link" => {
+                let opts = crate::cli::LinkOpts {
+                    dry_run: true,
+                    apply: false,
+                    scan: "all".to_string(),
+                };
+                match crate::run_link(vault_root, config, &opts) {
+                    Ok(report) => {
+                        if !report.is_empty() {
+                            println!("[daemon] link: {} suggestion(s)", report.violations.len());
+                        }
+                    }
+                    Err(e) => tracing::error!(error = %e, "link action failed"),
+                }
+            }
+            "intel" => {
+                let opts = crate::cli::IntelOpts {
+                    daily: true,
+                    weekly: false,
+                    output: None,
+                };
+                if let Err(e) = crate::run_intel(vault_root, config, &opts) {
+                    tracing::error!(error = %e, "intel action failed");
+                }
+            }
+            "state" => {
+                let opts = crate::cli::StateOpts {
+                    refresh: true,
+                    diff: false,
+                };
+                if let Err(e) = crate::run_state(vault_root, config, &opts) {
+                    tracing::error!(error = %e, "state action failed");
+                }
+            }
             other => {
                 tracing::warn!(action = %other, "unknown daemon action");
             }
