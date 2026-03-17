@@ -2,6 +2,7 @@ pub mod cli;
 pub mod config;
 pub mod duplicates;
 pub mod frontmatter;
+pub mod intel;
 pub mod linking;
 pub mod links;
 pub mod logging;
@@ -18,7 +19,7 @@ use eyre::Result;
 use std::path::Path;
 use tracing::instrument;
 
-use cli::{LinkOpts, LintOpts, MigrateOpts, StateOpts};
+use cli::{IntelOpts, LinkOpts, LintOpts, MigrateOpts, StateOpts};
 use config::Config;
 use report::Report;
 use state::VaultManifest;
@@ -191,4 +192,11 @@ pub fn run_link(vault_root: &Path, config: &Config, opts: &LinkOpts) -> Result<R
         report.print_human();
         Ok(report)
     }
+}
+
+#[instrument(skip(config, opts), fields(vault_root = %vault_root.display()))]
+pub fn run_intel(vault_root: &Path, config: &Config, opts: &IntelOpts) -> Result<()> {
+    tracing::info!("starting intel command");
+    let notes = scan_vault(vault_root, &config.vault)?;
+    intel::run_intel(vault_root, &notes, &config.actions.intel, opts)
 }

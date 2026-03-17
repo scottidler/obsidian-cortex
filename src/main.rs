@@ -31,8 +31,8 @@ fn main() -> Result<()> {
         Command::Link(opts) => {
             obsidian_cortex::run_link(&vault_root, &config, opts)?;
         }
-        Command::Intel(..) => {
-            println!("Intel command not yet implemented (Phase 2)");
+        Command::Intel(opts) => {
+            obsidian_cortex::run_intel(&vault_root, &config, opts)?;
         }
         Command::State(opts) => {
             obsidian_cortex::run_state(&vault_root, &config, opts)?;
