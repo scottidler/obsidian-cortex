@@ -5,6 +5,7 @@ pub mod logging;
 pub mod naming;
 pub mod report;
 pub mod state;
+pub mod tags;
 pub mod vault;
 
 use colored::Colorize;
@@ -47,6 +48,14 @@ pub fn run_lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<R
             frontmatter::apply_frontmatter(vault_root, &notes, &config.actions.frontmatter)?;
         } else {
             report.merge(frontmatter::lint_frontmatter(&notes, &config.actions.frontmatter));
+        }
+    }
+
+    if rules.contains(&"tags") {
+        if opts.apply {
+            tags::apply_tags(vault_root, &notes, &config.actions.tags)?;
+        } else {
+            report.merge(tags::lint_tags(&notes, &config.actions.tags));
         }
     }
 
