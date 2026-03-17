@@ -3,6 +3,7 @@ pub mod config;
 pub mod logging;
 pub mod report;
 pub mod state;
+pub mod vault;
 
 use colored::Colorize;
 use eyre::Result;
@@ -13,12 +14,13 @@ use cli::{LintOpts, StateOpts};
 use config::Config;
 use report::Report;
 use state::VaultManifest;
+use vault::scan_vault;
 
 #[instrument(skip(config, opts), fields(vault_root = %vault_root.display()))]
 pub fn run_lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<Report> {
     tracing::info!("starting lint run");
-    let manifest = VaultManifest::scan(vault_root, &config.vault.ignore)?;
-    tracing::info!(file_count = manifest.files.len(), "vault scanned");
+    let notes = scan_vault(vault_root, &config.vault)?;
+    tracing::info!(note_count = notes.len(), "vault scanned");
 
     let report = Report::default();
 
