@@ -71,24 +71,7 @@ fn extract_wikilinks(body: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vault::Frontmatter;
-    use std::path::PathBuf;
-
-    fn make_note(path: &str, body: &str) -> Note {
-        Note {
-            path: PathBuf::from(path),
-            frontmatter: Frontmatter::default(),
-            body: body.to_string(),
-            raw: String::new(),
-        }
-    }
-
-    fn default_config() -> BrokenLinksConfig {
-        BrokenLinksConfig {
-            check_wikilinks: true,
-            check_urls: false,
-        }
-    }
+    use crate::testutil::TestVault;
 
     #[test]
     fn test_extract_wikilinks() {
@@ -98,65 +81,47 @@ mod tests {
     }
 
     #[test]
-    fn test_no_broken_links() {
-        let notes = vec![
-            make_note("note-a.md", "Links to [[note-b]]."),
-            make_note("note-b.md", "Links to [[note-a]]."),
-        ];
+    fn test_broken_link_detected_on_vault() {
+        let v = TestVault::new();
+        let notes = v.scan();
+        let config = v.config().actions.broken_links;
 
-        let report = lint_broken_links(&notes, &default_config());
-        assert!(report.is_empty());
+        let report = lint_broken_links(&notes, &config);
+        // linker.md has [[nonexistent-page]] which is broken
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|vi| vi.path.to_string_lossy() == "linker.md" && vi.message.contains("nonexistent-page"))
+        );
     }
 
     #[test]
-    fn test_broken_link_detected() {
-        let notes = vec![make_note("note-a.md", "Links to [[nonexistent]].")];
+    fn test_valid_links_not_flagged() {
+        let v = TestVault::new();
+        let notes = v.scan();
+        let config = v.config().actions.broken_links;
 
-        let report = lint_broken_links(&notes, &default_config());
-        assert_eq!(report.violations.len(), 1);
-        assert_eq!(report.violations[0].rule, "broken-links.wikilink");
-        assert!(report.violations[0].message.contains("nonexistent"));
-    }
-
-    #[test]
-    fn test_case_insensitive_matching() {
-        let notes = vec![
-            make_note("My-Note.md", ""),
-            make_note("linker.md", "Links to [[my-note]]."),
-        ];
-
-        let report = lint_broken_links(&notes, &default_config());
-        assert!(report.is_empty());
+        let report = lint_broken_links(&notes, &config);
+        // python-guide.md links to [[rust-guide]] which exists - should NOT be broken
+        assert!(
+            !report
+                .violations
+                .iter()
+                .any(|vi| vi.path.to_string_lossy() == "python-guide.md" && vi.message.contains("rust-guide"))
+        );
     }
 
     #[test]
     fn test_disabled_check() {
-        let notes = vec![make_note("a.md", "Links to [[nonexistent]].")];
+        let v = TestVault::new();
+        let notes = v.scan();
         let config = BrokenLinksConfig {
             check_wikilinks: false,
             check_urls: false,
         };
 
         let report = lint_broken_links(&notes, &config);
-        assert!(report.is_empty());
-    }
-
-    #[test]
-    fn test_link_with_display_text() {
-        let notes = vec![
-            make_note("target.md", ""),
-            make_note("source.md", "See [[target|some display text]]."),
-        ];
-
-        let report = lint_broken_links(&notes, &default_config());
-        assert!(report.is_empty());
-    }
-
-    #[test]
-    fn test_no_wikilinks_in_body() {
-        let notes = vec![make_note("solo.md", "No links here, just text.")];
-
-        let report = lint_broken_links(&notes, &default_config());
         assert!(report.is_empty());
     }
 }

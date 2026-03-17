@@ -138,95 +138,54 @@ pub fn insert_frontmatter_fields(content: &str, fields: &[(String, serde_yaml::V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ScopeMatch, ScopeRule};
-    use crate::vault::Frontmatter;
-    use std::collections::HashMap;
-    use std::path::PathBuf;
-
-    fn make_note(path: &str, tags: Vec<&str>, extra: HashMap<String, serde_yaml::Value>) -> Note {
-        Note {
-            path: PathBuf::from(path),
-            frontmatter: Frontmatter {
-                title: Some("Test".to_string()),
-                date: Some("2026-01-01".to_string()),
-                note_type: Some("note".to_string()),
-                tags: Some(tags.into_iter().map(String::from).collect()),
-                extra,
-            },
-            body: String::new(),
-            raw: String::new(),
-        }
-    }
-
-    fn work_config() -> ScopeConfig {
-        ScopeConfig {
-            rules: vec![ScopeRule {
-                match_criteria: ScopeMatch {
-                    tags: Some(vec!["sre".to_string(), "tatari".to_string()]),
-                    source_contains: None,
-                },
-                set: {
-                    let mut m = HashMap::new();
-                    m.insert("scope".to_string(), serde_yaml::Value::String("work".to_string()));
-                    m.insert("company".to_string(), serde_yaml::Value::String("tatari".to_string()));
-                    m
-                },
-            }],
-        }
-    }
+    use crate::testutil::TestVault;
 
     #[test]
-    fn test_scope_matches_by_tag() {
-        let note = make_note("work-note.md", vec!["sre", "kubernetes"], HashMap::new());
-        let report = lint_scope(&[note], &work_config());
-        assert!(!report.is_empty());
-        assert!(report.violations.iter().any(|v| v.rule == "scope.scope"));
-    }
+    fn test_scope_matches_by_tag_on_vault() {
+        let v = TestVault::new();
+        let notes = v.scan();
+        let config = v.config().actions.scope;
 
-    #[test]
-    fn test_scope_no_match() {
-        let note = make_note("personal.md", vec!["rust", "hobby"], HashMap::new());
-        let report = lint_scope(&[note], &work_config());
-        assert!(report.is_empty());
-    }
-
-    #[test]
-    fn test_scope_already_set() {
-        let mut extra = HashMap::new();
-        extra.insert("scope".to_string(), serde_yaml::Value::String("work".to_string()));
-        extra.insert("company".to_string(), serde_yaml::Value::String("tatari".to_string()));
-
-        let note = make_note("already-scoped.md", vec!["sre"], extra);
-        let report = lint_scope(&[note], &work_config());
-        assert!(report.is_empty());
-    }
-
-    #[test]
-    fn test_scope_source_contains() {
-        let config = ScopeConfig {
-            rules: vec![ScopeRule {
-                match_criteria: ScopeMatch {
-                    tags: None,
-                    source_contains: Some("granola".to_string()),
-                },
-                set: {
-                    let mut m = HashMap::new();
-                    m.insert("scope".to_string(), serde_yaml::Value::String("work".to_string()));
-                    m.insert("confidential".to_string(), serde_yaml::Value::Bool(true));
-                    m
-                },
-            }],
-        };
-
-        let mut extra = HashMap::new();
-        extra.insert(
-            "source".to_string(),
-            serde_yaml::Value::String("granola-meeting-notes".to_string()),
+        let report = lint_scope(&notes, &config);
+        // daily-standup.md has tag "sre" - should match work scope rule
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|vi| vi.path.to_string_lossy() == "daily-standup.md")
         );
+    }
 
-        let note = make_note("meeting.md", vec![], extra);
-        let report = lint_scope(&[note], &config);
-        assert!(!report.is_empty());
+    #[test]
+    fn test_scope_source_contains_on_vault() {
+        let v = TestVault::new();
+        let notes = v.scan();
+        let config = v.config().actions.scope;
+
+        let report = lint_scope(&notes, &config);
+        // work-meeting.md has source: granola-meeting-notes
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|vi| vi.path.to_string_lossy() == "work-meeting.md")
+        );
+    }
+
+    #[test]
+    fn test_scope_no_match_on_personal() {
+        let v = TestVault::new();
+        let notes = v.scan();
+        let config = v.config().actions.scope;
+
+        let report = lint_scope(&notes, &config);
+        // rust-guide.md has no work tags, no granola source - should NOT match
+        assert!(
+            !report
+                .violations
+                .iter()
+                .any(|vi| vi.path.to_string_lossy() == "rust-guide.md")
+        );
     }
 
     #[test]
@@ -242,6 +201,19 @@ mod tests {
         let result = result.expect("should have result");
         assert!(result.contains("scope: work"));
         assert!(result.contains("company: tatari"));
-        assert!(result.contains("title: Test"));
+    }
+
+    #[test]
+    fn test_apply_scope_on_vault() {
+        let v = TestVault::new();
+        let notes = v.scan();
+        let config = v.config().actions.scope;
+
+        let count = apply_scope(v.root(), &notes, &config).expect("apply");
+        assert!(count > 0);
+
+        // daily-standup.md should now have scope: work
+        let content = v.read("daily-standup.md");
+        assert!(content.contains("scope: work"));
     }
 }

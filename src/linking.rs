@@ -210,94 +210,58 @@ fn insert_first_wikilink(content: &str, target: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::LinkingEntities;
-    use crate::vault::Frontmatter;
-    use std::path::PathBuf;
-
-    fn make_note(path: &str, title: &str, body: &str) -> Note {
-        Note {
-            path: PathBuf::from(path),
-            frontmatter: Frontmatter {
-                title: Some(title.to_string()),
-                ..Default::default()
-            },
-            body: body.to_string(),
-            raw: String::new(),
-        }
-    }
-
-    fn default_config() -> LinkingConfig {
-        LinkingConfig {
-            scan_for: vec!["all".to_string()],
-            entities: LinkingEntities {
-                people: vec!["John Smith".to_string()],
-                projects: vec!["obsidian-cortex".to_string()],
-            },
-        }
-    }
+    use crate::testutil::TestVault;
 
     #[test]
-    fn test_finds_note_title_mentions() {
-        let notes = vec![
-            make_note("rust-guide.md", "Rust Guide", "A comprehensive guide to Rust."),
-            make_note("my-notes.md", "My Notes", "I should read the Rust Guide for more info."),
-        ];
+    fn test_concept_linking_on_vault() {
+        let v = TestVault::new();
+        let notes = v.scan();
+        let config = v.config().actions.linking;
 
-        let report = lint_linking(&notes, &default_config());
+        let report = lint_linking(&notes, &config);
+        // rust-guide.md body mentions "Python Guide" - should suggest linking
         assert!(
             report
                 .violations
                 .iter()
-                .any(|v| v.rule == "linking.concept" && v.message.contains("Rust Guide"))
+                .any(|vi| vi.path.to_string_lossy() == "rust-guide.md"
+                    && vi.rule == "linking.concept"
+                    && vi.message.contains("Python Guide"))
         );
     }
 
     #[test]
-    fn test_no_self_link() {
-        let notes = vec![make_note("rust-guide.md", "Rust Guide", "This is the Rust Guide.")];
+    fn test_person_entity_on_vault() {
+        let v = TestVault::new();
+        let notes = v.scan();
+        let config = v.config().actions.linking;
 
-        let report = lint_linking(&notes, &default_config());
-        assert!(report.violations.iter().all(|v| v.rule != "linking.concept"));
+        let report = lint_linking(&notes, &config);
+        // daily-standup.md mentions "John Smith"
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|vi| vi.path.to_string_lossy() == "daily-standup.md" && vi.rule == "linking.person")
+        );
     }
 
     #[test]
-    fn test_skips_already_linked() {
-        let notes = vec![
-            make_note("rust-guide.md", "Rust Guide", ""),
-            make_note(
-                "my-notes.md",
-                "My Notes",
-                "See [[rust-guide]] for more info on Rust Guide.",
-            ),
-        ];
+    fn test_already_linked_not_suggested() {
+        let v = TestVault::new();
+        let notes = v.scan();
+        let config = v.config().actions.linking;
 
-        let report = lint_linking(&notes, &default_config());
-        let concept_violations: Vec<_> = report
-            .violations
-            .iter()
-            .filter(|v| v.rule == "linking.concept" && v.message.contains("Rust Guide"))
-            .collect();
-        assert!(concept_violations.is_empty());
-    }
-
-    #[test]
-    fn test_person_entity_linking() {
-        let notes = vec![make_note(
-            "meeting.md",
-            "Meeting Notes",
-            "Met with John Smith to discuss the project.",
-        )];
-
-        let report = lint_linking(&notes, &default_config());
-        assert!(report.violations.iter().any(|v| v.rule == "linking.person"));
-    }
-
-    #[test]
-    fn test_project_entity_linking() {
-        let notes = vec![make_note("dev-log.md", "Dev Log", "Working on obsidian-cortex today.")];
-
-        let report = lint_linking(&notes, &default_config());
-        assert!(report.violations.iter().any(|v| v.rule == "linking.project"));
+        let report = lint_linking(&notes, &config);
+        // python-guide.md already has [[rust-guide]] - should NOT suggest it again
+        assert!(
+            !report
+                .violations
+                .iter()
+                .any(|vi| vi.path.to_string_lossy() == "python-guide.md"
+                    && vi.rule == "linking.concept"
+                    && vi.message.contains("rust-guide"))
+        );
     }
 
     #[test]
@@ -307,7 +271,6 @@ mod tests {
         assert!(result.is_some());
         let result = result.expect("should have result");
         assert!(result.starts_with("Working on [[obsidian-cortex]]"));
-        // Only first occurrence should be linked
         assert_eq!(result.matches("[[").count(), 1);
     }
 

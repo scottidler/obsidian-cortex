@@ -249,57 +249,36 @@ pub fn scan_vault(vault_root: &Path, vault_config: &VaultConfig) -> Result<Vec<N
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-
-    fn write_note(dir: &Path, name: &str, content: &str) {
-        let path = dir.join(name);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("create dir");
-        }
-        let mut f = fs::File::create(path).expect("create file");
-        write!(f, "{content}").expect("write");
-    }
+    use crate::testutil::TestVault;
 
     #[test]
     fn test_parse_note_with_frontmatter() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        write_note(
-            tmp.path(),
-            "test.md",
-            "---\ntitle: Hello\ndate: 2026-01-01\ntype: note\ntags:\n  - rust\n  - cli\n---\nBody text here.\n",
-        );
-
-        let note = parse_note(tmp.path(), &tmp.path().join("test.md")).expect("parse");
-        assert_eq!(note.frontmatter.title.as_deref(), Some("Hello"));
-        assert_eq!(note.frontmatter.date.as_deref(), Some("2026-01-01"));
+        let v = TestVault::new();
+        let note = parse_note(v.root(), &v.root().join("rust-guide.md")).expect("parse");
+        assert_eq!(note.frontmatter.title.as_deref(), Some("Rust Guide"));
+        assert_eq!(note.frontmatter.date.as_deref(), Some("2026-03-10"));
         assert_eq!(note.frontmatter.note_type.as_deref(), Some("note"));
-        assert_eq!(note.frontmatter.tags, Some(vec!["rust".to_string(), "cli".to_string()]));
-        assert!(note.body.contains("Body text here."));
+        assert_eq!(
+            note.frontmatter.tags,
+            Some(vec!["rust".to_string(), "programming".to_string()])
+        );
+        assert!(note.body.contains("A guide to Rust programming."));
     }
 
     #[test]
     fn test_parse_note_without_frontmatter() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        write_note(tmp.path(), "bare.md", "Just some text without frontmatter.\n");
-
-        let note = parse_note(tmp.path(), &tmp.path().join("bare.md")).expect("parse");
+        let v = TestVault::new();
+        let note = parse_note(v.root(), &v.root().join("bare-note.md")).expect("parse");
         assert!(note.frontmatter.is_empty());
         assert!(note.body.contains("Just some text"));
     }
 
     #[test]
     fn test_parse_note_with_extra_fields() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        write_note(
-            tmp.path(),
-            "extra.md",
-            "---\ntitle: Extra\ndate: 2026-01-01\ntype: video\ntags: []\nsource: youtube\nchannel: test\n---\nVideo notes.\n",
-        );
-
-        let note = parse_note(tmp.path(), &tmp.path().join("extra.md")).expect("parse");
-        assert_eq!(note.frontmatter.title.as_deref(), Some("Extra"));
-        assert!(note.frontmatter.extra.contains_key("source"));
-        assert!(note.frontmatter.extra.contains_key("channel"));
+        let v = TestVault::new();
+        let note = parse_note(v.root(), &v.root().join("cool-video.md")).expect("parse");
+        assert_eq!(note.frontmatter.title.as_deref(), Some("Cool Video"));
+        assert_eq!(note.frontmatter.note_type.as_deref(), Some("video"));
     }
 
     #[test]
@@ -318,40 +297,30 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_vault() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        write_note(tmp.path(), "note1.md", "---\ntitle: Note 1\n---\nFirst note.\n");
-        write_note(tmp.path(), "note2.md", "---\ntitle: Note 2\n---\nSecond note.\n");
-        write_note(
-            tmp.path(),
-            ".obsidian/config.md",
-            "---\ntitle: Config\n---\nShould be ignored.\n",
-        );
-
-        let config = VaultConfig {
-            root_path: None,
-            ignore: vec![".obsidian".to_string()],
-            protected: Vec::new(),
-        };
-
-        let notes = scan_vault(tmp.path(), &config).expect("scan");
-        assert_eq!(notes.len(), 2);
+    fn test_scan_vault_ignores_obsidian_dir() {
+        let v = TestVault::new();
+        let notes = v.scan();
+        // .obsidian/workspace.md should NOT appear
+        assert!(!notes.iter().any(|n| n.path.to_string_lossy().contains(".obsidian")));
     }
 
     #[test]
     fn test_scan_vault_skips_protected() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        write_note(tmp.path(), "normal.md", "---\ntitle: Normal\n---\nKeep.\n");
-        write_note(tmp.path(), "protected.md", "---\ntitle: Protected\n---\nSkip.\n");
+        let v = TestVault::new();
+        let notes = v.scan();
+        // system/borg-ledger.md should NOT appear
+        assert!(!notes.iter().any(|n| n.path.to_string_lossy().contains("borg-ledger")));
+    }
 
-        let config = VaultConfig {
-            root_path: None,
-            ignore: Vec::new(),
-            protected: vec!["protected.md".to_string()],
-        };
-
-        let notes = scan_vault(tmp.path(), &config).expect("scan");
-        assert_eq!(notes.len(), 1);
-        assert_eq!(notes[0].path, PathBuf::from("normal.md"));
+    #[test]
+    fn test_scan_vault_finds_all_non_excluded() {
+        let v = TestVault::new();
+        let notes = v.scan();
+        // Should find all .md files except .obsidian/* and protected
+        assert!(notes.iter().any(|n| n.path == Path::new("rust-guide.md")));
+        assert!(notes.iter().any(|n| n.path == Path::new("bare-note.md")));
+        assert!(notes.iter().any(|n| n.path == Path::new("projects/obsidian-cortex.md")));
+        // readme.txt should not appear (not .md)
+        assert!(!notes.iter().any(|n| n.path.to_string_lossy().contains("readme")));
     }
 }

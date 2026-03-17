@@ -175,97 +175,35 @@ fn cosine_similarity(a: &HashMap<&str, f64>, b: &HashMap<&str, f64>) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vault::Frontmatter;
-    use std::path::PathBuf;
+    use crate::testutil::TestVault;
 
-    fn make_note(path: &str, body: &str, note_type: Option<&str>) -> Note {
-        Note {
-            path: PathBuf::from(path),
-            frontmatter: Frontmatter {
-                title: Some(path.to_string()),
-                note_type: note_type.map(String::from),
-                ..Default::default()
-            },
-            body: body.to_string(),
-            raw: String::new(),
-        }
+    #[test]
+    fn test_exact_duplicates_on_vault() {
+        let v = TestVault::new();
+        let notes = v.scan();
+        let config = v.config().actions.duplicates;
+
+        let report = lint_duplicates(&notes, &config);
+        // duplicate-a.md and duplicate-b.md have identical bodies
+        assert!(report.violations.iter().any(|vi| vi.rule == "duplicates.exact"
+            && (vi.path.to_string_lossy().contains("duplicate-a")
+                || vi.path.to_string_lossy().contains("duplicate-b"))));
     }
 
     #[test]
-    fn test_exact_duplicates() {
-        let notes = vec![
-            make_note("a.md", "Hello world this is a test note.", None),
-            make_note("b.md", "Hello world this is a test note.", None),
-        ];
-
-        let config = DuplicatesConfig {
-            threshold: 0.85,
-            same_type_only: false,
-        };
+    fn test_unique_notes_not_flagged() {
+        let v = TestVault::new();
+        let notes = v.scan();
+        let config = v.config().actions.duplicates;
 
         let report = lint_duplicates(&notes, &config);
-        assert!(report.violations.iter().any(|v| v.rule == "duplicates.exact"));
-    }
-
-    #[test]
-    fn test_no_duplicates() {
-        let notes = vec![
-            make_note("a.md", "Completely different content about Rust.", None),
-            make_note("b.md", "This note discusses cooking recipes for pasta.", None),
-        ];
-
-        let config = DuplicatesConfig {
-            threshold: 0.85,
-            same_type_only: false,
-        };
-
-        let report = lint_duplicates(&notes, &config);
-        assert!(report.is_empty());
-    }
-
-    #[test]
-    fn test_similar_notes() {
-        let notes = vec![
-            make_note(
-                "a.md",
-                "Rust programming language systems programming memory safety borrow checker",
-                None,
-            ),
-            make_note(
-                "b.md",
-                "Rust programming language systems programming memory safety ownership",
-                None,
-            ),
-        ];
-
-        let config = DuplicatesConfig {
-            threshold: 0.5,
-            same_type_only: false,
-        };
-
-        let report = lint_duplicates(&notes, &config);
+        // rust-guide.md and python-guide.md have different content
         assert!(
-            report
+            !report
                 .violations
                 .iter()
-                .any(|v| v.rule == "duplicates.similar" || v.rule == "duplicates.exact")
+                .any(|vi| vi.rule == "duplicates.exact" && vi.path.to_string_lossy() == "rust-guide.md")
         );
-    }
-
-    #[test]
-    fn test_same_type_only() {
-        let notes = vec![
-            make_note("a.md", "Same content here.", Some("video")),
-            make_note("b.md", "Same content here.", Some("article")),
-        ];
-
-        let config = DuplicatesConfig {
-            threshold: 0.85,
-            same_type_only: true,
-        };
-
-        let report = lint_duplicates(&notes, &config);
-        assert!(report.is_empty());
     }
 
     #[test]

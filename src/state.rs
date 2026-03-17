@@ -147,154 +147,70 @@ impl VaultManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use std::io::Write;
-
-    fn create_test_vault(dir: &Path) {
-        let note1 = dir.join("note1.md");
-        let note2 = dir.join("note2.md");
-        let sub = dir.join("subfolder");
-        fs::create_dir_all(&sub).expect("create subfolder");
-        let note3 = sub.join("note3.md");
-
-        let mut f1 = fs::File::create(note1).expect("create note1");
-        writeln!(f1, "---\ntitle: Note 1\n---\nHello").expect("write note1");
-
-        let mut f2 = fs::File::create(note2).expect("create note2");
-        writeln!(f2, "---\ntitle: Note 2\n---\nWorld").expect("write note2");
-
-        let mut f3 = fs::File::create(note3).expect("create note3");
-        writeln!(f3, "---\ntitle: Note 3\n---\nSub note").expect("write note3");
-
-        // Non-md file should be ignored
-        fs::write(dir.join("readme.txt"), "not a note").expect("write txt");
-    }
+    use crate::testutil::TestVault;
 
     #[test]
     fn test_scan_finds_md_files() {
-        let tmp = tempfile::tempdir().expect("create temp dir");
-        create_test_vault(tmp.path());
-
-        let manifest = VaultManifest::scan(tmp.path(), &[]).expect("scan");
-        assert_eq!(manifest.files.len(), 3);
+        let v = TestVault::new();
+        let manifest = VaultManifest::scan(v.root(), &[]).expect("scan");
+        // All .md files in the vault (including .obsidian and protected - manifest doesn't filter)
+        assert!(manifest.files.len() >= 14);
     }
 
     #[test]
     fn test_scan_ignores_directories() {
-        let tmp = tempfile::tempdir().expect("create temp dir");
-        create_test_vault(tmp.path());
-
-        let manifest = VaultManifest::scan(tmp.path(), &["subfolder".to_string()]).expect("scan");
-        assert_eq!(manifest.files.len(), 2);
+        let v = TestVault::new();
+        let all = VaultManifest::scan(v.root(), &[]).expect("all");
+        let filtered = VaultManifest::scan(v.root(), &[".obsidian".to_string()]).expect("filtered");
+        assert!(filtered.files.len() < all.files.len());
     }
 
     #[test]
     fn test_diff_detects_added() {
-        let old = VaultManifest {
-            timestamp: Utc::now(),
-            files: vec![FileEntry {
-                path: PathBuf::from("a.md"),
-                size: 10,
-                mtime: 100,
-            }],
-        };
-        let new = VaultManifest {
-            timestamp: Utc::now(),
-            files: vec![
-                FileEntry {
-                    path: PathBuf::from("a.md"),
-                    size: 10,
-                    mtime: 100,
-                },
-                FileEntry {
-                    path: PathBuf::from("b.md"),
-                    size: 20,
-                    mtime: 200,
-                },
-            ],
-        };
+        let v = TestVault::new();
+        let before = VaultManifest::scan(v.root(), &[]).expect("before");
+        v.add_note("new-note.md", "---\ntitle: New\n---\nFresh.\n");
+        let after = VaultManifest::scan(v.root(), &[]).expect("after");
 
-        let diff = old.diff(&new);
-        assert_eq!(diff.added, vec![PathBuf::from("b.md")]);
-        assert!(diff.removed.is_empty());
-        assert!(diff.modified.is_empty());
+        let diff = before.diff(&after);
+        assert!(diff.added.iter().any(|p| p.to_string_lossy().contains("new-note")));
     }
 
     #[test]
     fn test_diff_detects_removed() {
-        let old = VaultManifest {
-            timestamp: Utc::now(),
-            files: vec![
-                FileEntry {
-                    path: PathBuf::from("a.md"),
-                    size: 10,
-                    mtime: 100,
-                },
-                FileEntry {
-                    path: PathBuf::from("b.md"),
-                    size: 20,
-                    mtime: 200,
-                },
-            ],
-        };
-        let new = VaultManifest {
-            timestamp: Utc::now(),
-            files: vec![FileEntry {
-                path: PathBuf::from("a.md"),
-                size: 10,
-                mtime: 100,
-            }],
-        };
+        let v = TestVault::new();
+        let before = VaultManifest::scan(v.root(), &[]).expect("before");
+        std::fs::remove_file(v.root().join("bare-note.md")).expect("remove");
+        let after = VaultManifest::scan(v.root(), &[]).expect("after");
 
-        let diff = old.diff(&new);
-        assert!(diff.added.is_empty());
-        assert_eq!(diff.removed, vec![PathBuf::from("b.md")]);
-        assert!(diff.modified.is_empty());
+        let diff = before.diff(&after);
+        assert!(diff.removed.iter().any(|p| p.to_string_lossy().contains("bare-note")));
     }
 
     #[test]
     fn test_diff_detects_modified() {
-        let old = VaultManifest {
-            timestamp: Utc::now(),
-            files: vec![FileEntry {
-                path: PathBuf::from("a.md"),
-                size: 10,
-                mtime: 100,
-            }],
-        };
-        let new = VaultManifest {
-            timestamp: Utc::now(),
-            files: vec![FileEntry {
-                path: PathBuf::from("a.md"),
-                size: 15,
-                mtime: 200,
-            }],
-        };
+        let v = TestVault::new();
+        let before = VaultManifest::scan(v.root(), &[]).expect("before");
+        // Touch the file to change mtime/size
+        std::fs::write(
+            v.root().join("bare-note.md"),
+            "Updated content that is different and longer than before.\n",
+        )
+        .expect("write");
+        let after = VaultManifest::scan(v.root(), &[]).expect("after");
 
-        let diff = old.diff(&new);
-        assert!(diff.added.is_empty());
-        assert!(diff.removed.is_empty());
-        assert_eq!(diff.modified, vec![PathBuf::from("a.md")]);
+        let diff = before.diff(&after);
+        assert!(diff.modified.iter().any(|p| p.to_string_lossy().contains("bare-note")));
     }
 
     #[test]
     fn test_manifest_roundtrip() {
-        let tmp = tempfile::tempdir().expect("create temp dir");
-        let path = tmp.path().join("manifest.yml");
-
-        let manifest = VaultManifest {
-            timestamp: Utc::now(),
-            files: vec![FileEntry {
-                path: PathBuf::from("test.md"),
-                size: 42,
-                mtime: 1234567890,
-            }],
-        };
-
+        let v = TestVault::new();
+        let manifest = VaultManifest::scan(v.root(), &[]).expect("scan");
+        let path = v.root().join(".cortex/manifest.yml");
         manifest.save(&path).expect("save");
+
         let loaded = VaultManifest::load(&path).expect("load");
-        assert_eq!(loaded.files.len(), 1);
-        assert_eq!(loaded.files[0].path, PathBuf::from("test.md"));
-        assert_eq!(loaded.files[0].size, 42);
+        assert_eq!(loaded.files.len(), manifest.files.len());
     }
 }

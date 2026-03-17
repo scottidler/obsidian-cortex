@@ -197,49 +197,37 @@ fn update_wikilinks_for_moves(vault_root: &Path, notes: &[Note], renames: &[(Pat
 mod tests {
     use super::*;
     use crate::config::MigrationMove;
-    use crate::vault::Frontmatter;
+    use crate::testutil::TestVault;
     use std::collections::HashMap;
 
-    fn make_note(path: &str) -> Note {
-        Note {
-            path: PathBuf::from(path),
-            frontmatter: Frontmatter::default(),
-            body: String::new(),
-            raw: String::new(),
-        }
-    }
-
     #[test]
-    fn test_plan_migration_matches_glob() {
-        let notes = vec![
-            make_note("Tech/note-a.md"),
-            make_note("Tech/note-b.md"),
-            make_note("Work/note-c.md"),
-        ];
+    fn test_plan_migration_on_vault() {
+        let v = TestVault::new();
+        let notes = v.scan();
 
         let migration = MigrationConfig {
-            name: "flatten".to_string(),
+            name: "flatten-projects".to_string(),
             moves: vec![MigrationMove {
-                from: "Tech/**".to_string(),
+                from: "projects/**".to_string(),
                 to: "Notes/".to_string(),
                 set_frontmatter: None,
             }],
         };
 
         let moves = plan_migration(&notes, &migration);
-        assert_eq!(moves.len(), 2);
-        assert_eq!(moves[0].to, PathBuf::from("Notes/note-a.md"));
-        assert_eq!(moves[1].to, PathBuf::from("Notes/note-b.md"));
+        assert_eq!(moves.len(), 1);
+        assert_eq!(moves[0].to, PathBuf::from("Notes/obsidian-cortex.md"));
     }
 
     #[test]
     fn test_plan_migration_no_match() {
-        let notes = vec![make_note("Other/note.md")];
+        let v = TestVault::new();
+        let notes = v.scan();
 
         let migration = MigrationConfig {
             name: "noop".to_string(),
             moves: vec![MigrationMove {
-                from: "Tech/**".to_string(),
+                from: "nonexistent/**".to_string(),
                 to: "Notes/".to_string(),
                 set_frontmatter: None,
             }],
@@ -250,16 +238,17 @@ mod tests {
     }
 
     #[test]
-    fn test_plan_migration_with_frontmatter() {
-        let notes = vec![make_note("Work/meeting.md")];
+    fn test_plan_migration_with_frontmatter_set() {
+        let v = TestVault::new();
+        let notes = v.scan();
 
         let mut fm_set = HashMap::new();
         fm_set.insert("scope".to_string(), serde_yaml::Value::String("work".to_string()));
 
         let migration = MigrationConfig {
-            name: "scope-work".to_string(),
+            name: "scope-projects".to_string(),
             moves: vec![MigrationMove {
-                from: "Work/**".to_string(),
+                from: "projects/**".to_string(),
                 to: "Notes/".to_string(),
                 set_frontmatter: Some(fm_set),
             }],
@@ -271,13 +260,34 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_migrate_moves_files() {
+        let v = TestVault::new();
+        let notes = v.scan();
+
+        let migrations = vec![MigrationConfig {
+            name: "flatten".to_string(),
+            moves: vec![MigrationMove {
+                from: "projects/**".to_string(),
+                to: "Notes/".to_string(),
+                set_frontmatter: None,
+            }],
+        }];
+
+        let count = apply_migrate(v.root(), &notes, &migrations).expect("apply");
+        assert_eq!(count, 1);
+        assert!(v.exists("Notes/obsidian-cortex.md"));
+        assert!(!v.exists("projects/obsidian-cortex.md"));
+    }
+
+    #[test]
     fn test_lint_migrate_reports_moves() {
-        let notes = vec![make_note("Tech/note.md")];
+        let v = TestVault::new();
+        let notes = v.scan();
 
         let migrations = vec![MigrationConfig {
             name: "test".to_string(),
             moves: vec![MigrationMove {
-                from: "Tech/**".to_string(),
+                from: "projects/**".to_string(),
                 to: "Notes/".to_string(),
                 set_frontmatter: None,
             }],

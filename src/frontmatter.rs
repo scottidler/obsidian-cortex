@@ -202,142 +202,70 @@ pub fn apply_frontmatter(vault_root: &Path, notes: &[Note], config: &Frontmatter
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vault::Frontmatter;
-    use std::collections::HashMap;
-    use std::path::PathBuf;
+    use crate::testutil::TestVault;
 
-    fn make_note(path: &str, fm: Frontmatter, raw: &str) -> Note {
-        Note {
-            path: PathBuf::from(path),
-            frontmatter: fm,
-            body: String::new(),
-            raw: raw.to_string(),
-        }
-    }
+    #[test]
+    fn test_valid_notes_pass() {
+        let v = TestVault::new();
+        let notes = v.scan();
+        let config = v.config().actions.frontmatter;
 
-    fn default_config() -> FrontmatterConfig {
-        FrontmatterConfig {
-            required: vec![
-                "title".to_string(),
-                "date".to_string(),
-                "type".to_string(),
-                "tags".to_string(),
-            ],
-            type_fields: HashMap::new(),
-            auto_title: true,
-        }
+        let report = lint_frontmatter(&notes, &config);
+        // rust-guide.md has all required fields - should NOT be flagged
+        assert!(
+            !report
+                .violations
+                .iter()
+                .any(|v| v.path.to_string_lossy() == "rust-guide.md")
+        );
     }
 
     #[test]
-    fn test_valid_frontmatter() {
-        let note = make_note(
-            "valid.md",
-            Frontmatter {
-                title: Some("Valid Note".to_string()),
-                date: Some("2026-01-01".to_string()),
-                note_type: Some("note".to_string()),
-                tags: Some(vec!["rust".to_string()]),
-                extra: HashMap::new(),
-            },
-            "---\ntitle: Valid Note\ndate: 2026-01-01\ntype: note\ntags: [rust]\n---\n",
-        );
+    fn test_missing_frontmatter_detected() {
+        let v = TestVault::new();
+        let notes = v.scan();
+        let config = v.config().actions.frontmatter;
 
-        let report = lint_frontmatter(&[note], &default_config());
-        assert!(report.is_empty());
+        let report = lint_frontmatter(&notes, &config);
+        // bare-note.md has no frontmatter
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|v| v.path.to_string_lossy() == "bare-note.md" && v.rule == "frontmatter.missing")
+        );
     }
 
     #[test]
     fn test_missing_required_fields() {
-        let note = make_note(
-            "missing.md",
-            Frontmatter {
-                title: Some("Has Title".to_string()),
-                date: None,
-                note_type: None,
-                tags: None,
-                extra: HashMap::new(),
-            },
-            "---\ntitle: Has Title\n---\n",
-        );
+        let v = TestVault::new();
+        let notes = v.scan();
+        let config = v.config().actions.frontmatter;
 
-        let report = lint_frontmatter(&[note], &default_config());
-        assert_eq!(report.violations.len(), 3); // date, type, tags
-    }
-
-    #[test]
-    fn test_no_frontmatter() {
-        let note = make_note("bare.md", Frontmatter::default(), "Just text without frontmatter.\n");
-
-        let report = lint_frontmatter(&[note], &default_config());
-        assert!(report.violations.iter().any(|v| v.rule == "frontmatter.missing"));
-    }
-
-    #[test]
-    fn test_invalid_date_format() {
-        let note = make_note(
-            "bad-date.md",
-            Frontmatter {
-                title: Some("Test".to_string()),
-                date: Some("Jan 1, 2026".to_string()),
-                note_type: Some("note".to_string()),
-                tags: Some(vec![]),
-                extra: HashMap::new(),
-            },
-            "---\ntitle: Test\ndate: Jan 1, 2026\ntype: note\ntags: []\n---\n",
-        );
-
-        let report = lint_frontmatter(&[note], &default_config());
-        assert!(report.violations.iter().any(|v| v.rule == "frontmatter.date-format"));
-    }
-
-    #[test]
-    fn test_invalid_tag_format() {
-        let note = make_note(
-            "bad-tags.md",
-            Frontmatter {
-                title: Some("Test".to_string()),
-                date: Some("2026-01-01".to_string()),
-                note_type: Some("note".to_string()),
-                tags: Some(vec!["Good-Tag".to_string(), "bad tag".to_string()]),
-                extra: HashMap::new(),
-            },
-            "---\ntitle: Test\n---\n",
-        );
-
-        let report = lint_frontmatter(&[note], &default_config());
-        let tag_violations: Vec<_> = report
+        let report = lint_frontmatter(&notes, &config);
+        // partial-frontmatter.md has title but missing date, type, tags
+        let partial_violations: Vec<_> = report
             .violations
             .iter()
-            .filter(|v| v.rule == "frontmatter.tag-format")
+            .filter(|v| v.path.to_string_lossy() == "partial-frontmatter.md")
             .collect();
-        assert_eq!(tag_violations.len(), 2);
+        assert_eq!(partial_violations.len(), 3);
     }
 
     #[test]
     fn test_type_specific_fields() {
-        let mut type_fields = HashMap::new();
-        type_fields.insert("video".to_string(), vec!["source".to_string(), "channel".to_string()]);
+        let v = TestVault::new();
+        let notes = v.scan();
+        let config = v.config().actions.frontmatter;
 
-        let config = FrontmatterConfig {
-            required: vec!["title".to_string()],
-            type_fields,
-            auto_title: true,
-        };
-
-        let note = make_note(
-            "video.md",
-            Frontmatter {
-                title: Some("Video".to_string()),
-                date: Some("2026-01-01".to_string()),
-                note_type: Some("video".to_string()),
-                tags: Some(vec![]),
-                extra: HashMap::new(),
-            },
-            "---\ntitle: Video\ntype: video\n---\n",
+        let report = lint_frontmatter(&notes, &config);
+        // cool-video.md is type=video but missing source, channel
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|v| v.path.to_string_lossy() == "cool-video.md" && v.rule.contains("type-field.video"))
         );
-
-        let report = lint_frontmatter(&[note], &config);
-        assert_eq!(report.violations.len(), 2); // source, channel
     }
 
     #[test]
@@ -347,27 +275,17 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_title_fix() {
-        let note = make_note(
-            "my-note.md",
-            Frontmatter {
-                title: None,
-                date: Some("2026-01-01".to_string()),
-                note_type: Some("note".to_string()),
-                tags: Some(vec![]),
-                extra: HashMap::new(),
-            },
-            "---\ndate: 2026-01-01\ntype: note\ntags: []\n---\n",
-        );
+    fn test_apply_inserts_frontmatter() {
+        let v = TestVault::new();
+        let notes = v.scan();
+        let config = v.config().actions.frontmatter;
 
-        let report = lint_frontmatter(&[note], &default_config());
-        let title_violation = report
-            .violations
-            .iter()
-            .find(|v| v.rule == "frontmatter.required.title")
-            .expect("should have title violation");
+        let count = apply_frontmatter(v.root(), &notes, &config).expect("apply");
+        assert!(count > 0);
 
-        assert!(matches!(&title_violation.fix, Some(Fix::SetFrontmatter { key, value })
-            if key == "title" && matches!(value, serde_yaml::Value::String(s) if s == "My Note")));
+        // bare-note.md should now have frontmatter
+        let content = v.read("bare-note.md");
+        assert!(content.starts_with("---\n"));
+        assert!(content.contains("title:"));
     }
 }

@@ -258,48 +258,36 @@ mod tests {
     }
 
     #[test]
-    fn test_lint_naming_reports_violations() {
-        let notes = vec![
-            Note {
-                path: PathBuf::from("valid-note.md"),
-                frontmatter: Default::default(),
-                body: String::new(),
-                raw: String::new(),
-            },
-            Note {
-                path: PathBuf::from("Bad Note Name.md"),
-                frontmatter: Default::default(),
-                body: String::new(),
-                raw: String::new(),
-            },
-        ];
-
-        let config = NamingConfig {
-            style: "lowercase-hyphenated".to_string(),
-            max_length: 80,
-            exempt_patterns: Vec::new(),
-        };
+    fn test_lint_naming_on_vault() {
+        let v = crate::testutil::TestVault::new();
+        let notes = v.scan();
+        let config = v.config().actions.naming;
 
         let report = lint_naming(&notes, &config);
-        assert_eq!(report.violations.len(), 1);
-        assert_eq!(report.violations[0].rule, "naming.lowercase-hyphenated");
+        // "My Awesome Note.md" should be flagged
+        assert!(
+            report.violations.iter().any(
+                |v| v.rule == "naming.lowercase-hyphenated" && v.path.to_string_lossy().contains("My Awesome Note")
+            )
+        );
+        // Valid slugs should NOT be flagged
+        assert!(
+            !report
+                .violations
+                .iter()
+                .any(|v| v.path.to_string_lossy() == "rust-guide.md")
+        );
     }
 
     #[test]
     fn test_lint_naming_max_length() {
-        let long_name = format!("{}.md", "a".repeat(100));
-        let notes = vec![Note {
-            path: PathBuf::from(&long_name),
-            frontmatter: Default::default(),
-            body: String::new(),
-            raw: String::new(),
-        }];
-
-        let config = NamingConfig {
-            style: "lowercase-hyphenated".to_string(),
-            max_length: 80,
-            exempt_patterns: Vec::new(),
-        };
+        let v = crate::testutil::TestVault::new();
+        v.add_note(
+            &format!("{}.md", "a".repeat(100)),
+            "---\ntitle: Long\n---\nLong name.\n",
+        );
+        let notes = v.scan();
+        let config = v.config().actions.naming;
 
         let report = lint_naming(&notes, &config);
         assert!(report.violations.iter().any(|v| v.rule == "naming.max-length"));
@@ -307,13 +295,9 @@ mod tests {
 
     #[test]
     fn test_lint_naming_exempt() {
-        let notes = vec![Note {
-            path: PathBuf::from("System/Bad Name.md"),
-            frontmatter: Default::default(),
-            body: String::new(),
-            raw: String::new(),
-        }];
-
+        let v = crate::testutil::TestVault::new();
+        v.add_note("System/Bad Name.md", "---\ntitle: Bad\n---\nExempt.\n");
+        let notes = v.scan();
         let config = NamingConfig {
             style: "lowercase-hyphenated".to_string(),
             max_length: 80,
@@ -321,6 +305,24 @@ mod tests {
         };
 
         let report = lint_naming(&notes, &config);
-        assert!(report.is_empty());
+        assert!(
+            !report
+                .violations
+                .iter()
+                .any(|v| v.path.to_string_lossy().contains("System/Bad Name"))
+        );
+    }
+
+    #[test]
+    fn test_apply_naming_renames_files() {
+        let v = crate::testutil::TestVault::new();
+        let notes = v.scan();
+        let config = v.config().actions.naming;
+
+        let renames = apply_naming(v.root(), &notes, &config).expect("apply");
+        assert!(!renames.is_empty());
+        // "My Awesome Note.md" should be renamed to "my-awesome-note.md"
+        assert!(v.exists("my-awesome-note.md"));
+        assert!(!v.exists("My Awesome Note.md"));
     }
 }

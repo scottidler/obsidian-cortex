@@ -14,6 +14,7 @@ pub mod report;
 pub mod scope;
 pub mod state;
 pub mod tags;
+pub mod testutil;
 pub mod vault;
 
 use colored::Colorize;

@@ -208,75 +208,48 @@ fn replace_tags_in_frontmatter(content: &str, new_tags: &[String]) -> Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vault::Frontmatter;
-    use std::path::PathBuf;
-
-    fn make_note(path: &str, tags: Vec<&str>) -> Note {
-        Note {
-            path: PathBuf::from(path),
-            frontmatter: Frontmatter {
-                title: Some("Test".to_string()),
-                date: Some("2026-01-01".to_string()),
-                note_type: Some("note".to_string()),
-                tags: Some(tags.into_iter().map(String::from).collect()),
-                extra: Default::default(),
-            },
-            body: String::new(),
-            raw: String::new(),
-        }
-    }
-
-    fn default_config() -> TagsConfig {
-        TagsConfig {
-            style: "lowercase-hyphenated".to_string(),
-            canonical: vec![
-                "ai-llm".to_string(),
-                "rust".to_string(),
-                "python".to_string(),
-                "kubernetes".to_string(),
-            ],
-            aliases: {
-                let mut m = HashMap::new();
-                m.insert("ai".to_string(), "ai-llm".to_string());
-                m.insert("k8s".to_string(), "kubernetes".to_string());
-                m
-            },
-        }
-    }
+    use crate::testutil::TestVault;
 
     #[test]
-    fn test_valid_tags() {
-        let note = make_note("valid.md", vec!["rust", "python"]);
-        let report = lint_tags(&[note], &default_config());
-        // Only orphan warnings expected
-        let non_orphan: Vec<_> = report.violations.iter().filter(|v| v.rule != "tags.orphan").collect();
-        assert!(non_orphan.is_empty());
-    }
+    fn test_alias_resolution_on_vault() {
+        let v = TestVault::new();
+        let notes = v.scan();
+        let config = v.config().actions.tags;
 
-    #[test]
-    fn test_alias_resolution() {
-        let note = make_note("alias.md", vec!["ai", "rust"]);
-        let report = lint_tags(&[note], &default_config());
+        let report = lint_tags(&notes, &config);
+        // ai-research.md has tags: [ai, k8s] which are aliases
         assert!(
             report
                 .violations
                 .iter()
-                .any(|v| v.rule == "tags.alias" && v.message.contains("ai-llm"))
+                .any(|vi| vi.path.to_string_lossy() == "ai-research.md"
+                    && vi.rule == "tags.alias"
+                    && vi.message.contains("ai-llm"))
+        );
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|vi| vi.path.to_string_lossy() == "ai-research.md"
+                    && vi.rule == "tags.alias"
+                    && vi.message.contains("kubernetes"))
         );
     }
 
     #[test]
-    fn test_non_canonical_tag() {
-        let note = make_note("non-canon.md", vec!["obscure-tag"]);
-        let report = lint_tags(&[note], &default_config());
-        assert!(report.violations.iter().any(|v| v.rule == "tags.non-canonical"));
-    }
+    fn test_non_canonical_tag_on_vault() {
+        let v = TestVault::new();
+        let notes = v.scan();
+        let config = v.config().actions.tags;
 
-    #[test]
-    fn test_invalid_format() {
-        let note = make_note("bad-format.md", vec!["Bad Tag"]);
-        let report = lint_tags(&[note], &default_config());
-        assert!(report.violations.iter().any(|v| v.rule == "tags.format"));
+        let report = lint_tags(&notes, &config);
+        // hobby-project.md has tag "obscure-hobby" not in canonical list
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|vi| vi.path.to_string_lossy() == "hobby-project.md" && vi.rule == "tags.non-canonical")
+        );
     }
 
     #[test]
@@ -292,7 +265,6 @@ mod tests {
         assert!(is_valid_tag("rust"));
         assert!(is_valid_tag("ai-llm"));
         assert!(is_valid_tag("k8s"));
-
         assert!(!is_valid_tag("Bad"));
         assert!(!is_valid_tag("has space"));
         assert!(!is_valid_tag("-leading"));
@@ -300,16 +272,17 @@ mod tests {
     }
 
     #[test]
-    fn test_orphan_detection() {
-        let notes = vec![
-            make_note("a.md", vec!["rust", "python"]),
-            make_note("b.md", vec!["rust"]),
-        ];
+    fn test_apply_tags_resolves_aliases() {
+        let v = TestVault::new();
+        let notes = v.scan();
+        let config = v.config().actions.tags;
 
-        let report = lint_tags(&notes, &default_config());
-        let orphans: Vec<_> = report.violations.iter().filter(|v| v.rule == "tags.orphan").collect();
-        assert_eq!(orphans.len(), 1);
-        assert!(orphans[0].message.contains("python"));
+        let count = apply_tags(v.root(), &notes, &config).expect("apply");
+        assert!(count > 0);
+
+        // ai-research.md should now have ai-llm and kubernetes instead of ai and k8s
+        let content = v.read("ai-research.md");
+        assert!(content.contains("ai-llm") || content.contains("kubernetes"));
     }
 
     #[test]

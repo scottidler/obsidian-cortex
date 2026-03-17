@@ -209,96 +209,54 @@ fn write_intel_output(path: &Path, content: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::IntelConfig;
-    use crate::vault::Frontmatter;
-
-    fn make_note(path: &str, title: &str, date: &str, note_type: &str, tags: Vec<&str>) -> Note {
-        Note {
-            path: PathBuf::from(path),
-            frontmatter: Frontmatter {
-                title: Some(title.to_string()),
-                date: Some(date.to_string()),
-                note_type: Some(note_type.to_string()),
-                tags: Some(tags.into_iter().map(String::from).collect()),
-                extra: Default::default(),
-            },
-            body: String::new(),
-            raw: String::new(),
-        }
-    }
+    use crate::testutil::TestVault;
 
     #[test]
-    fn test_daily_digest_generation() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let today = Local::now().format("%Y-%m-%d").to_string();
-
-        let notes = vec![
-            make_note("note-a.md", "Note A", &today, "note", vec!["rust"]),
-            make_note("note-b.md", "Note B", "2020-01-01", "note", vec!["python"]),
-        ];
-
-        let config = IntelConfig {
-            daily_note: true,
-            weekly_review: false,
-            fabric_patterns: vec![],
-            output_path: "output".to_string(),
-        };
-
+    fn test_daily_digest_on_vault() {
+        let v = TestVault::new();
+        let notes = v.scan();
+        let config = v.config().actions.intel;
         let opts = IntelOpts {
             daily: true,
             weekly: false,
             output: None,
         };
 
-        run_intel(tmp.path(), &notes, &config, &opts).expect("run_intel");
+        run_intel(v.root(), &notes, &config, &opts).expect("run_intel");
 
-        let digest_path = tmp.path().join("output").join(format!("daily-{today}.md"));
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let digest_path = v.root().join("ai-output").join(format!("daily-{today}.md"));
         assert!(digest_path.exists());
-        let content = std::fs::read_to_string(&digest_path).expect("read digest");
+        let content = std::fs::read_to_string(&digest_path).expect("read");
         assert!(content.contains("Daily Digest"));
-        assert!(content.contains("Note A"));
+        assert!(content.contains("Total vault notes:"));
     }
 
     #[test]
-    fn test_weekly_review_generation() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let today = Local::now().format("%Y-%m-%d").to_string();
-
-        let notes = vec![make_note(
-            "note-a.md",
-            "Note A",
-            &today,
-            "video",
-            vec!["rust", "ai-llm"],
-        )];
-
-        let config = IntelConfig {
-            daily_note: false,
-            weekly_review: true,
-            fabric_patterns: vec![],
-            output_path: "output".to_string(),
-        };
-
+    fn test_weekly_review_on_vault() {
+        let v = TestVault::new();
+        let notes = v.scan();
+        let config = v.config().actions.intel;
         let opts = IntelOpts {
             daily: false,
             weekly: true,
             output: None,
         };
 
-        run_intel(tmp.path(), &notes, &config, &opts).expect("run_intel");
+        run_intel(v.root(), &notes, &config, &opts).expect("run_intel");
 
-        // Find the generated file
-        let output_dir = tmp.path().join("output");
+        let output_dir = v.root().join("ai-output");
         assert!(output_dir.exists());
         let files: Vec<_> = std::fs::read_dir(&output_dir)
             .expect("read dir")
             .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("weekly-"))
             .collect();
         assert!(!files.is_empty());
     }
 
     #[test]
-    fn test_resolve_output_path_with_explicit_output() {
+    fn test_resolve_output_path_explicit() {
         let config = IntelConfig::default();
         let opts = IntelOpts {
             daily: true,
