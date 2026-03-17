@@ -1,10 +1,11 @@
-pub mod broken_links;
 pub mod cli;
 pub mod config;
 pub mod frontmatter;
+pub mod links;
 pub mod logging;
 pub mod naming;
 pub mod report;
+pub mod scope;
 pub mod state;
 pub mod tags;
 pub mod vault;
@@ -60,8 +61,16 @@ pub fn run_lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<R
         }
     }
 
+    if rules.contains(&"scope") {
+        if opts.apply {
+            scope::apply_scope(vault_root, &notes, &config.actions.scope)?;
+        } else {
+            report.merge(scope::lint_scope(&notes, &config.actions.scope));
+        }
+    }
+
     if rules.contains(&"broken-links") {
-        report.merge(broken_links::lint_broken_links(&notes, &config.actions.broken_links));
+        report.merge(links::lint_broken_links(&notes, &config.actions.broken_links));
     }
 
     if opts.format == "json" {
