@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod config;
 pub mod logging;
+pub mod naming;
 pub mod report;
 pub mod state;
 pub mod vault;
@@ -22,9 +23,8 @@ pub fn run_lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<R
     let notes = scan_vault(vault_root, &config.vault)?;
     tracing::info!(note_count = notes.len(), "vault scanned");
 
-    let report = Report::default();
+    let mut report = Report::default();
 
-    // Lint rules will be added in subsequent phases
     let rules: Vec<&str> = if opts.rule.is_empty() {
         vec!["naming", "frontmatter", "tags", "scope", "broken-links"]
     } else {
@@ -32,6 +32,14 @@ pub fn run_lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<R
     };
 
     tracing::info!(?rules, "running lint rules");
+
+    if rules.contains(&"naming") {
+        if opts.apply {
+            naming::apply_naming(vault_root, &notes, &config.actions.naming)?;
+        } else {
+            report.merge(naming::lint_naming(&notes, &config.actions.naming));
+        }
+    }
 
     if opts.format == "json" {
         report.print_json()?;
