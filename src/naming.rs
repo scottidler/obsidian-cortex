@@ -296,12 +296,12 @@ mod tests {
     #[test]
     fn test_lint_naming_exempt() {
         let v = crate::testutil::TestVault::new();
-        v.add_note("System/Bad Name.md", "---\ntitle: Bad\n---\nExempt.\n");
+        v.add_note("system/Bad Name.md", "---\ntitle: Bad\n---\nExempt.\n");
         let notes = v.scan();
         let config = NamingConfig {
             style: "lowercase-hyphenated".to_string(),
             max_length: 80,
-            exempt_patterns: vec!["^System/".to_string()],
+            exempt_patterns: vec!["^system/".to_string()],
         };
 
         let report = lint_naming(&notes, &config);
@@ -309,7 +309,7 @@ mod tests {
             !report
                 .violations
                 .iter()
-                .any(|v| v.path.to_string_lossy().contains("System/Bad Name"))
+                .any(|v| v.path.to_string_lossy().contains("system/Bad Name"))
         );
     }
 

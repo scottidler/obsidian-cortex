@@ -213,7 +213,7 @@ impl Default for IntelConfig {
             daily_note: true,
             weekly_review: true,
             fabric_patterns: vec!["extract_wisdom".to_string(), "summarize".to_string()],
-            output_path: "System/ai-output".to_string(),
+            output_path: "system/ai-output".to_string(),
         }
     }
 }
