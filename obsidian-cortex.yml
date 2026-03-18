@@ -9,6 +9,10 @@ vault:
   protected:
     - "system/borg-ledger.md"
     - "system/borg-dashboard.md"
+  exclude:
+    - "CLAUDE.md"
+    - "README.md"
+    - "system/templates/**"
 
 log-level: info
 
