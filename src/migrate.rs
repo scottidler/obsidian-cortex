@@ -1,5 +1,6 @@
 use eyre::{Context, Result};
 use glob::Pattern;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tracing::instrument;
 
@@ -15,12 +16,13 @@ struct PlannedMove {
     set_frontmatter: Vec<(String, serde_yaml::Value)>,
 }
 
-/// Run migration dry-run: report what would be moved.
+/// Run migration dry-run: report what would be moved and what fields would change.
 #[instrument(skip(notes, migrations))]
 pub fn lint_migrate(notes: &[Note], migrations: &[MigrationConfig]) -> Report {
     let mut report = Report::default();
 
     for migration in migrations {
+        // Report file moves
         let moves = plan_migration(notes, migration);
         for planned in &moves {
             report.add(Violation {
@@ -34,25 +36,39 @@ pub fn lint_migrate(notes: &[Note], migrations: &[MigrationConfig]) -> Report {
                 }),
             });
         }
+
+        // Report field transforms
+        lint_field_transforms(notes, migration, &mut report);
     }
 
     tracing::info!(violation_count = report.violations.len(), "migrate lint complete");
     report
 }
 
-/// Apply migrations: move files and update frontmatter.
+/// Apply migrations: field transforms first, then file moves.
 #[instrument(skip(notes, migrations))]
 pub fn apply_migrate(vault_root: &Path, notes: &[Note], migrations: &[MigrationConfig]) -> Result<usize> {
-    let mut move_count = 0;
-    let mut all_moves: Vec<PlannedMove> = Vec::new();
+    let mut total_count = 0;
 
+    // Phase 1: Apply field transforms (renames and drops)
+    for migration in migrations {
+        if !migration.field_renames.is_empty() || !migration.field_drops.is_empty() {
+            let count = apply_field_transforms(vault_root, notes, migration)?;
+            total_count += count;
+        }
+    }
+
+    // Phase 2: Apply file moves
+    let mut all_moves: Vec<PlannedMove> = Vec::new();
     for migration in migrations {
         all_moves.extend(plan_migration(notes, migration));
     }
 
     if all_moves.is_empty() {
-        return Ok(0);
+        return Ok(total_count);
     }
+
+    let mut move_count = 0;
 
     // Execute moves
     for planned in &all_moves {
@@ -89,7 +105,7 @@ pub fn apply_migrate(vault_root: &Path, notes: &[Note], migrations: &[MigrationC
     let renames: Vec<(PathBuf, PathBuf)> = all_moves.iter().map(|m| (m.from.clone(), m.to.clone())).collect();
     update_wikilinks_for_moves(vault_root, notes, &renames)?;
 
-    Ok(move_count)
+    Ok(total_count + move_count)
 }
 
 /// Plan all moves for a single migration config.
@@ -190,8 +206,136 @@ fn update_wikilinks_for_moves(vault_root: &Path, notes: &[Note], renames: &[(Pat
     Ok(())
 }
 
-// Re-export insert_frontmatter_fields so it can be used by scope module
-// (it's already in scope module, we just call it from there)
+/// Report what field transforms would be applied (dry-run).
+fn lint_field_transforms(notes: &[Note], migration: &MigrationConfig, report: &mut Report) {
+    if migration.field_renames.is_empty() && migration.field_drops.is_empty() {
+        return;
+    }
+
+    for note in notes {
+        for (old_key, new_key) in &migration.field_renames {
+            if note.frontmatter.extra.contains_key(old_key) {
+                report.add(Violation {
+                    path: note.path.clone(),
+                    rule: format!("migrate.{}.rename", migration.name),
+                    severity: Severity::Info,
+                    message: format!("would rename field '{old_key}' to '{new_key}'"),
+                    fix: None,
+                });
+            }
+        }
+        for drop_key in &migration.field_drops {
+            if note.frontmatter.extra.contains_key(drop_key) {
+                report.add(Violation {
+                    path: note.path.clone(),
+                    rule: format!("migrate.{}.drop", migration.name),
+                    severity: Severity::Info,
+                    message: format!("would drop field '{drop_key}'"),
+                    fix: None,
+                });
+            }
+        }
+    }
+}
+
+/// Apply field renames and drops within frontmatter blocks.
+/// Operates on the raw text between `---` delimiters to preserve formatting.
+fn apply_field_transforms(vault_root: &Path, notes: &[Note], migration: &MigrationConfig) -> Result<usize> {
+    let mut count = 0;
+
+    for note in notes {
+        // Quick check: does this note have any fields to transform?
+        let has_rename_target = migration
+            .field_renames
+            .keys()
+            .any(|k| note.frontmatter.extra.contains_key(k));
+        let has_drop_target = migration
+            .field_drops
+            .iter()
+            .any(|k| note.frontmatter.extra.contains_key(k));
+
+        if !has_rename_target && !has_drop_target {
+            continue;
+        }
+
+        let abs_path = vault_root.join(&note.path);
+        let content = std::fs::read_to_string(&abs_path).context(format!("failed to read {}", abs_path.display()))?;
+
+        let Some((fm_block, before, after)) = extract_frontmatter_block(&content) else {
+            continue;
+        };
+
+        let mut lines: Vec<String> = fm_block.lines().map(String::from).collect();
+        let mut changed = false;
+
+        // Build set of existing keys for conflict detection
+        let existing_keys: HashSet<String> = lines
+            .iter()
+            .filter_map(|l| l.split(':').next().map(|k| k.trim().to_string()))
+            .collect();
+
+        // Apply renames
+        for (old_key, new_key) in &migration.field_renames {
+            for line in &mut lines {
+                if line.starts_with(&format!("{old_key}:")) {
+                    if existing_keys.contains(new_key) {
+                        tracing::warn!(
+                            path = %note.path.display(),
+                            old_key,
+                            new_key,
+                            "skipping rename: target field already exists"
+                        );
+                    } else {
+                        *line = line.replacen(old_key, new_key, 1);
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        // Apply drops
+        let original_len = lines.len();
+        lines.retain(|line| {
+            !migration
+                .field_drops
+                .iter()
+                .any(|dk| line.starts_with(&format!("{dk}:")))
+        });
+        if lines.len() != original_len {
+            changed = true;
+        }
+
+        if changed {
+            let new_content = format!("{before}---\n{}\n---{after}", lines.join("\n"));
+            std::fs::write(&abs_path, new_content)?;
+            tracing::info!(path = %note.path.display(), "applied field transforms");
+            count += 1;
+        }
+    }
+
+    Ok(count)
+}
+
+/// Extract the frontmatter block from file content.
+/// Returns (frontmatter_text, content_before_opening_delim, content_after_closing_delim).
+fn extract_frontmatter_block(content: &str) -> Option<(&str, &str, &str)> {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        return None;
+    }
+
+    let before_offset = content.len() - trimmed.len();
+    let before = &content[..before_offset];
+
+    let after_opening = &trimmed[3..];
+    let after_opening = after_opening.trim_start_matches(['\r', '\n']);
+
+    let end_pos = after_opening.find("\n---")?;
+    let fm_block = &after_opening[..end_pos];
+    let after = &after_opening[end_pos + 4..]; // skip \n---
+
+    Some((fm_block, before, after))
+}
 
 #[cfg(test)]
 mod tests {
@@ -301,5 +445,129 @@ mod tests {
         let report = lint_migrate(&notes, &migrations);
         assert_eq!(report.violations.len(), 1);
         assert_eq!(report.violations[0].rule, "migrate.test");
+    }
+
+    #[test]
+    fn test_field_rename_applies() {
+        let v = TestVault::new();
+        let notes = v.scan();
+
+        let mut renames = HashMap::new();
+        renames.insert("url".to_string(), "source".to_string());
+        renames.insert("author".to_string(), "creator".to_string());
+
+        let migration = MigrationConfig {
+            name: "v2-renames".to_string(),
+            field_renames: renames,
+            ..Default::default()
+        };
+
+        let count = apply_field_transforms(v.root(), &notes, &migration).expect("apply");
+        assert!(count > 0, "expected at least one file transformed");
+
+        // legacy-note.md had url and author, should now have source and creator
+        let content = v.read("legacy-note.md");
+        assert!(content.contains("source:"), "expected 'source:' after rename");
+        assert!(content.contains("creator:"), "expected 'creator:' after rename");
+        assert!(!content.contains("\nurl:"), "expected 'url:' to be renamed");
+        assert!(!content.contains("\nauthor:"), "expected 'author:' to be renamed");
+    }
+
+    #[test]
+    fn test_field_drop_applies() {
+        let v = TestVault::new();
+        // Add a note with droppable fields
+        v.add_note(
+            "drop-test.md",
+            "---\ntitle: Drop Test\ndate: 2026-01-01\ntype: note\nday: monday\ntime: 10:00\ntags: []\n---\nBody.\n",
+        );
+        let notes = v.scan();
+
+        let migration = MigrationConfig {
+            name: "v2-drops".to_string(),
+            field_drops: vec!["day".to_string(), "time".to_string()],
+            ..Default::default()
+        };
+
+        let count = apply_field_transforms(v.root(), &notes, &migration).expect("apply");
+        assert!(count > 0);
+
+        let content = v.read("drop-test.md");
+        assert!(!content.contains("day:"));
+        assert!(!content.contains("time:"));
+        assert!(content.contains("title: Drop Test"));
+    }
+
+    #[test]
+    fn test_field_rename_skips_conflict() {
+        let v = TestVault::new();
+        // Note already has both 'author' and 'creator'
+        v.add_note(
+            "conflict-note.md",
+            "---\ntitle: Conflict\ndate: 2026-01-01\ntype: note\nauthor: Old Author\ncreator: Existing Creator\ntags: []\n---\nBody.\n",
+        );
+        let notes = v.scan();
+
+        let mut renames = HashMap::new();
+        renames.insert("author".to_string(), "creator".to_string());
+
+        let migration = MigrationConfig {
+            name: "v2-renames".to_string(),
+            field_renames: renames,
+            ..Default::default()
+        };
+
+        let count = apply_field_transforms(v.root(), &notes, &migration).expect("apply");
+        // Should skip due to conflict - creator already exists
+        let content = v.read("conflict-note.md");
+        assert!(
+            content.contains("author: Old Author"),
+            "author should be preserved due to conflict"
+        );
+        assert!(content.contains("creator: Existing Creator"));
+        // The conflict note should not count as transformed since it was skipped
+        // (legacy-note.md may also get transformed, so count could be > 0)
+        let _ = count;
+    }
+
+    #[test]
+    fn test_lint_field_transforms_reports() {
+        let v = TestVault::new();
+        let notes = v.scan();
+
+        let mut renames = HashMap::new();
+        renames.insert("url".to_string(), "source".to_string());
+
+        let migrations = vec![MigrationConfig {
+            name: "v2".to_string(),
+            field_renames: renames,
+            field_drops: vec!["folder".to_string()],
+            ..Default::default()
+        }];
+
+        let report = lint_migrate(&notes, &migrations);
+        // legacy-note.md has both url and folder
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|v| v.rule.contains("rename") && v.path.to_string_lossy() == "legacy-note.md")
+        );
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|v| v.rule.contains("drop") && v.path.to_string_lossy() == "legacy-note.md")
+        );
+    }
+
+    #[test]
+    fn test_extract_frontmatter_block() {
+        let content = "---\ntitle: Test\ndate: 2026-01-01\n---\nBody here.\n";
+        let (fm, before, after) = extract_frontmatter_block(content).expect("extract");
+        assert!(fm.contains("title: Test"));
+        assert!(fm.contains("date: 2026-01-01"));
+        assert_eq!(before, "");
+        assert!(after.contains("Body here."));
     }
 }
