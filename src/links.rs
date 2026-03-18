@@ -11,23 +11,28 @@ use crate::vault::Note;
 static WIKILINK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]").expect("valid wikilink regex"));
 
-/// Run broken link detection on all notes.
-#[instrument(skip(notes, config))]
-pub fn lint_broken_links(notes: &[Note], config: &BrokenLinksConfig) -> Report {
+/// Run broken link detection.
+/// `lintable_notes` are checked for violations; `all_notes` are used to build
+/// the resolution indexes (so excluded files still count as valid link targets).
+#[instrument(skip(lintable_notes, all_notes, config))]
+pub fn lint_broken_links(lintable_notes: &[Note], all_notes: &[Note], config: &BrokenLinksConfig) -> Report {
     let mut report = Report::default();
 
     if !config.check_wikilinks {
         return report;
     }
 
-    // Build a set of all note stems (case-insensitive for Obsidian compatibility)
-    let note_stems: HashSet<String> = notes
+    // Build indexes from ALL notes (including excluded) so that links to
+    // excluded files still resolve correctly.
+
+    // Stem index: file stems in lowercase
+    let note_stems: HashSet<String> = all_notes
         .iter()
         .filter_map(|n| n.path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_lowercase()))
         .collect();
 
-    // Also include stems with path for disambiguated links
-    let note_paths: HashSet<String> = notes
+    // Path index: full paths with extension stripped, lowercased
+    let note_paths: HashSet<String> = all_notes
         .iter()
         .map(|n| {
             let path = n.path.with_extension("");
@@ -35,14 +40,26 @@ pub fn lint_broken_links(notes: &[Note], config: &BrokenLinksConfig) -> Report {
         })
         .collect();
 
-    for note in notes {
+    // Title index: lowercased frontmatter titles for exact title match
+    let title_set: HashSet<String> = all_notes
+        .iter()
+        .filter_map(|n| n.frontmatter.title.as_ref())
+        .map(|t| t.to_lowercase())
+        .collect();
+
+    // Only check lintable notes for violations
+    for note in lintable_notes {
         let links = extract_wikilinks(&note.body);
 
         for link in links {
             let target_lower = link.to_lowercase();
+            let target_slug = crate::naming::to_slug(&link);
 
-            // Check if target exists (stem match or path match)
-            let exists = note_stems.contains(&target_lower) || note_paths.contains(&target_lower.replace('\\', "/"));
+            // Resolution order: stem -> path -> title -> slug-of-target
+            let exists = note_stems.contains(&target_lower)
+                || note_paths.contains(&target_lower.replace('\\', "/"))
+                || title_set.contains(&target_lower)
+                || note_stems.contains(&target_slug);
 
             if !exists {
                 report.add(Violation {
@@ -86,7 +103,7 @@ mod tests {
         let notes = v.scan();
         let config = v.config().actions.broken_links;
 
-        let report = lint_broken_links(&notes, &config);
+        let report = lint_broken_links(&notes, &notes, &config);
         // linker.md has [[nonexistent-page]] which is broken
         assert!(
             report
@@ -102,7 +119,7 @@ mod tests {
         let notes = v.scan();
         let config = v.config().actions.broken_links;
 
-        let report = lint_broken_links(&notes, &config);
+        let report = lint_broken_links(&notes, &notes, &config);
         // python-guide.md links to [[rust-guide]] which exists - should NOT be broken
         assert!(
             !report
@@ -121,7 +138,85 @@ mod tests {
             check_urls: false,
         };
 
-        let report = lint_broken_links(&notes, &config);
+        let report = lint_broken_links(&notes, &notes, &config);
         assert!(report.is_empty());
+    }
+
+    #[test]
+    fn test_title_case_wikilink_resolves_via_slug() {
+        let v = TestVault::new();
+        v.add_note(
+            "zone-blocking-families.md",
+            "---\ntitle: Zone Blocking Families\ndate: 2026-03-18\ntype: note\ndomain: football\norigin: authored\ntags:\n  - football\n---\nZone blocking content.\n",
+        );
+        v.add_note(
+            "borg-ledger.md",
+            "---\ntitle: Borg Ledger\ndate: 2026-03-18\ntype: system\ndomain: system\norigin: generated\ntags: []\n---\nSee [[Zone Blocking Families]] for details.\n",
+        );
+        let notes = v.scan();
+        let config = v.config().actions.broken_links;
+
+        let report = lint_broken_links(&notes, &notes, &config);
+        // [[Zone Blocking Families]] should resolve to zone-blocking-families.md via slug match
+        assert!(
+            !report
+                .violations
+                .iter()
+                .any(|vi| vi.message.contains("Zone Blocking Families")),
+            "title-case wikilink should resolve via slug match"
+        );
+    }
+
+    #[test]
+    fn test_title_match_wikilink_resolves() {
+        let v = TestVault::new();
+        // Note where title differs from filename
+        v.add_note(
+            "my-custom-slug.md",
+            "---\ntitle: A Totally Different Title\ndate: 2026-03-18\ntype: note\ndomain: tech\norigin: authored\ntags: []\n---\nContent.\n",
+        );
+        v.add_note(
+            "referrer.md",
+            "---\ntitle: Referrer\ndate: 2026-03-18\ntype: note\ndomain: tech\norigin: authored\ntags: []\n---\nSee [[A Totally Different Title]] here.\n",
+        );
+        let notes = v.scan();
+        let config = v.config().actions.broken_links;
+
+        let report = lint_broken_links(&notes, &notes, &config);
+        assert!(
+            !report
+                .violations
+                .iter()
+                .any(|vi| vi.message.contains("A Totally Different Title")),
+            "wikilink matching exact title should resolve"
+        );
+    }
+
+    #[test]
+    fn test_excluded_files_still_resolve_as_targets() {
+        use crate::testutil::NoteBuilder;
+
+        let all_notes = vec![
+            NoteBuilder::new("readme.md")
+                .title("README")
+                .body("Repo readme.")
+                .build(),
+            NoteBuilder::new("linker.md")
+                .title("Linker")
+                .body("See [[readme]] for info.")
+                .build(),
+        ];
+        // Only linker.md is lintable, but readme.md is in all_notes for index
+        let lintable_notes = vec![all_notes[1].clone()];
+        let config = BrokenLinksConfig {
+            check_wikilinks: true,
+            check_urls: false,
+        };
+
+        let report = lint_broken_links(&lintable_notes, &all_notes, &config);
+        assert!(
+            !report.violations.iter().any(|vi| vi.message.contains("readme")),
+            "excluded file should still be a valid link target"
+        );
     }
 }

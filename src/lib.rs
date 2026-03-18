@@ -26,7 +26,34 @@ use cli::{IntelOpts, LinkOpts, LintOpts, MigrateOpts, StateOpts};
 use config::Config;
 use report::Report;
 use state::VaultManifest;
-use vault::scan_vault;
+use vault::{Note, scan_vault};
+
+/// Check if a note's path matches any of the exclude glob patterns.
+fn is_excluded(note: &Note, exclude_patterns: &[glob::Pattern]) -> bool {
+    exclude_patterns.iter().any(|pat| {
+        let path_str = note.path.to_string_lossy();
+        pat.matches(&path_str)
+            || note
+                .path
+                .file_name()
+                .map(|f| pat.matches(f.to_string_lossy().as_ref()))
+                .unwrap_or(false)
+    })
+}
+
+/// Parse exclude pattern strings into glob::Pattern objects.
+fn parse_exclude_patterns(patterns: &[String]) -> Vec<glob::Pattern> {
+    patterns
+        .iter()
+        .filter_map(|p| match glob::Pattern::new(p) {
+            Ok(pat) => Some(pat),
+            Err(e) => {
+                tracing::warn!(pattern = %p, error = %e, "invalid exclude glob pattern, skipping");
+                None
+            }
+        })
+        .collect()
+}
 
 #[instrument(skip(config, opts), fields(vault_root = %vault_root.display()))]
 pub fn run_lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<Report> {
@@ -34,14 +61,26 @@ pub fn run_lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<R
     let all_notes = scan_vault(vault_root, &config.vault)?;
 
     // Apply --path glob filter if provided
-    let notes: Vec<_> = if let Some(ref pattern) = opts.path {
+    let all_notes: Vec<_> = if let Some(ref pattern) = opts.path {
         let glob = glob::Pattern::new(pattern).map_err(|e| eyre::eyre!("invalid glob pattern '{}': {}", pattern, e))?;
         all_notes.into_iter().filter(|n| glob.matches_path(&n.path)).collect()
     } else {
         all_notes
     };
 
-    tracing::info!(note_count = notes.len(), "vault scanned");
+    // Split into all_notes (for link indexes) and lintable_notes (for violations)
+    let exclude_patterns = parse_exclude_patterns(&config.vault.exclude);
+    let lintable_notes: Vec<Note> = all_notes
+        .iter()
+        .filter(|n| !is_excluded(n, &exclude_patterns))
+        .cloned()
+        .collect();
+
+    tracing::info!(
+        all_count = all_notes.len(),
+        lintable_count = lintable_notes.len(),
+        "vault scanned"
+    );
 
     let mut report = Report::default();
 
@@ -55,18 +94,18 @@ pub fn run_lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<R
 
     if rules.contains(&"naming") {
         if opts.apply {
-            naming::apply_naming(vault_root, &notes, &config.actions.naming)?;
+            naming::apply_naming(vault_root, &lintable_notes, &config.actions.naming)?;
         } else {
-            report.merge(naming::lint_naming(&notes, &config.actions.naming));
+            report.merge(naming::lint_naming(&lintable_notes, &config.actions.naming));
         }
     }
 
     if rules.contains(&"frontmatter") {
         if opts.apply {
-            frontmatter::apply_frontmatter(vault_root, &notes, &config.actions.frontmatter, &config.schema)?;
+            frontmatter::apply_frontmatter(vault_root, &lintable_notes, &config.actions.frontmatter, &config.schema)?;
         } else {
             report.merge(frontmatter::lint_frontmatter(
-                &notes,
+                &lintable_notes,
                 &config.actions.frontmatter,
                 &config.schema,
             ));
@@ -75,26 +114,30 @@ pub fn run_lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<R
 
     if rules.contains(&"tags") {
         if opts.apply {
-            tags::apply_tags(vault_root, &notes, &config.actions.tags)?;
+            tags::apply_tags(vault_root, &lintable_notes, &config.actions.tags)?;
         } else {
-            report.merge(tags::lint_tags(&notes, &config.actions.tags));
+            report.merge(tags::lint_tags(&lintable_notes, &config.actions.tags));
         }
     }
 
     if rules.contains(&"scope") {
         if opts.apply {
-            scope::apply_scope(vault_root, &notes, &config.actions.scope)?;
+            scope::apply_scope(vault_root, &lintable_notes, &config.actions.scope)?;
         } else {
-            report.merge(scope::lint_scope(&notes, &config.actions.scope));
+            report.merge(scope::lint_scope(&lintable_notes, &config.actions.scope));
         }
     }
 
     if rules.contains(&"broken-links") {
-        report.merge(links::lint_broken_links(&notes, &config.actions.broken_links));
+        report.merge(links::lint_broken_links(
+            &lintable_notes,
+            &all_notes,
+            &config.actions.broken_links,
+        ));
     }
 
     if rules.contains(&"duplicates") {
-        report.merge(duplicates::lint_duplicates(&notes, &config.actions.duplicates));
+        report.merge(duplicates::lint_duplicates(&lintable_notes, &config.actions.duplicates));
     }
 
     if opts.format == "json" {

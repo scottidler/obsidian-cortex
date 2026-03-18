@@ -50,6 +50,7 @@ pub struct VaultConfig {
     pub root_path: Option<String>,
     pub ignore: Vec<String>,
     pub protected: Vec<String>,
+    pub exclude: Vec<String>,
 }
 
 impl Default for VaultConfig {
@@ -64,6 +65,7 @@ impl Default for VaultConfig {
                 "attachments".to_string(),
             ],
             protected: Vec::new(),
+            exclude: Vec::new(),
         }
     }
 }

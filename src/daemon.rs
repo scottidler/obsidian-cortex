@@ -148,7 +148,7 @@ fn run_configured_actions(vault_root: &Path, config: &Config, daemon_config: &Da
                         continue;
                     }
                 };
-                let report = crate::links::lint_broken_links(&notes, &config.actions.broken_links);
+                let report = crate::links::lint_broken_links(&notes, &notes, &config.actions.broken_links);
                 if !report.is_empty() {
                     println!("[daemon] broken-links: {} violation(s)", report.violations.len());
                 }
