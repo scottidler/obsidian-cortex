@@ -89,7 +89,7 @@ fn matches_rule(note: &Note, rule: &crate::config::ScopeRule) -> bool {
 
     // Check source-contains matching
     if let Some(ref source_pattern) = match_criteria.source_contains
-        && let Some(serde_yaml::Value::String(source)) = note.frontmatter.extra.get("source")
+        && let Some(ref source) = note.frontmatter.source
         && source.to_lowercase().contains(&source_pattern.to_lowercase())
     {
         return true;

@@ -36,28 +36,28 @@ impl TestVault {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         let root = dir.path();
 
-        // -- Well-formed notes --
+        // -- Well-formed notes (v2 schema) --
         write(
             root,
             "rust-guide.md",
-            "---\ntitle: Rust Guide\ndate: 2026-03-10\ntype: note\ntags:\n  - rust\n  - programming\n---\nA guide to Rust programming.\n\nSee also the Python Guide for comparisons.\n",
+            "---\ntitle: Rust Guide\ndate: 2026-03-10\ntype: note\ndomain: tech\norigin: authored\ntags:\n  - rust\n  - programming\n---\nA guide to Rust programming.\n\nSee also the Python Guide for comparisons.\n",
         );
         write(
             root,
             "python-guide.md",
-            "---\ntitle: Python Guide\ndate: 2026-03-11\ntype: note\ntags:\n  - python\n  - programming\n---\nA guide to Python programming.\n\nRelated: [[rust-guide]]\n",
+            "---\ntitle: Python Guide\ndate: 2026-03-11\ntype: note\ndomain: tech\norigin: authored\ntags:\n  - python\n  - programming\n---\nA guide to Python programming.\n\nRelated: [[rust-guide]]\n",
         );
         write(
             root,
             "daily-standup.md",
-            "---\ntitle: Daily Standup\ndate: 2026-03-16\ntype: meeting\ntags:\n  - sre\n  - tatari\n---\nDiscussed deployment pipeline.\n\nJohn Smith presented the new approach.\n",
+            "---\ntitle: Daily Standup\ndate: 2026-03-16\ntype: meeting\ndomain: work\norigin: authored\ntags:\n  - sre\n  - tatari\n---\nDiscussed deployment pipeline.\n\nJohn Smith presented the new approach.\n",
         );
 
         // -- Bad filename (not lowercase-hyphenated) --
         write(
             root,
             "My Awesome Note.md",
-            "---\ntitle: My Awesome Note\ndate: 2026-03-12\ntype: note\ntags:\n  - writing\n---\nThis filename violates naming conventions.\n",
+            "---\ntitle: My Awesome Note\ndate: 2026-03-12\ntype: note\ndomain: writing\norigin: authored\ntags:\n  - writing\n---\nThis filename violates naming conventions.\n",
         );
 
         // -- Missing frontmatter entirely --
@@ -74,54 +74,82 @@ impl TestVault {
         write(
             root,
             "ai-research.md",
-            "---\ntitle: AI Research\ndate: 2026-03-13\ntype: research\ntags:\n  - ai\n  - k8s\n---\nResearch on AI and Kubernetes.\n",
+            "---\ntitle: AI Research\ndate: 2026-03-13\ntype: research\ndomain: ai\norigin: assisted\ntags:\n  - ai\n  - k8s\n---\nResearch on AI and Kubernetes.\n",
         );
 
         // -- Non-canonical tag --
         write(
             root,
             "hobby-project.md",
-            "---\ntitle: Hobby Project\ndate: 2026-03-14\ntype: note\ntags:\n  - obscure-hobby\n---\nA personal hobby project.\n",
+            "---\ntitle: Hobby Project\ndate: 2026-03-14\ntype: note\ndomain: tech\norigin: authored\ntags:\n  - obscure-hobby\n---\nA personal hobby project.\n",
         );
 
         // -- Broken wikilink --
         write(
             root,
             "linker.md",
-            "---\ntitle: Linker\ndate: 2026-03-15\ntype: note\ntags:\n  - rust\n---\nSee [[nonexistent-page]] for more.\n\nAlso see [[rust-guide]] which exists.\n",
+            "---\ntitle: Linker\ndate: 2026-03-15\ntype: note\ndomain: tech\norigin: authored\ntags:\n  - rust\n---\nSee [[nonexistent-page]] for more.\n\nAlso see [[rust-guide]] which exists.\n",
         );
 
         // -- Duplicate content (exact) --
         write(
             root,
             "duplicate-a.md",
-            "---\ntitle: Duplicate A\ndate: 2026-03-14\ntype: note\ntags:\n  - rust\n---\nThis is the exact same body content for duplicate detection.\n",
+            "---\ntitle: Duplicate A\ndate: 2026-03-14\ntype: note\ndomain: tech\norigin: authored\ntags:\n  - rust\n---\nThis is the exact same body content for duplicate detection.\n",
         );
         write(
             root,
             "duplicate-b.md",
-            "---\ntitle: Duplicate B\ndate: 2026-03-14\ntype: note\ntags:\n  - rust\n---\nThis is the exact same body content for duplicate detection.\n",
+            "---\ntitle: Duplicate B\ndate: 2026-03-14\ntype: note\ndomain: tech\norigin: authored\ntags:\n  - rust\n---\nThis is the exact same body content for duplicate detection.\n",
         );
 
         // -- Scope: work note with granola source --
         write(
             root,
             "work-meeting.md",
-            "---\ntitle: Work Meeting\ndate: 2026-03-16\ntype: meeting\ntags:\n  - sre\nsource: granola-meeting-notes\n---\nConfidential work meeting.\n",
+            "---\ntitle: Work Meeting\ndate: 2026-03-16\ntype: meeting\ndomain: work\norigin: authored\ntags:\n  - sre\nsource: granola-meeting-notes\n---\nConfidential work meeting.\n",
         );
 
-        // -- Video type (missing type-specific fields: source, channel) --
+        // -- Video type (missing type-specific fields: source, creator) --
         write(
             root,
             "cool-video.md",
-            "---\ntitle: Cool Video\ndate: 2026-03-15\ntype: video\ntags:\n  - rust\n---\nNotes on a cool video.\n",
+            "---\ntitle: Cool Video\ndate: 2026-03-15\ntype: video\ndomain: tech\norigin: assisted\ntags:\n  - rust\n---\nNotes on a cool video.\n",
         );
 
         // -- Note in a subfolder --
         write(
             root,
             "projects/obsidian-cortex.md",
-            "---\ntitle: Obsidian Cortex\ndate: 2026-03-16\ntype: note\ntags:\n  - rust\n  - obsidian\n---\nThe vault governance tool.\n",
+            "---\ntitle: Obsidian Cortex\ndate: 2026-03-16\ntype: note\ndomain: tech\norigin: authored\ntags:\n  - rust\n  - obsidian\n---\nThe vault governance tool.\n",
+        );
+
+        // -- Daily note (no domain required per v2 exemption) --
+        write(
+            root,
+            "daily/2026-03-18.md",
+            "---\ntitle: 2026-03-18\ndate: 2026-03-18\ntype: daily\norigin: authored\ntags: []\n---\nDaily journal entry.\n",
+        );
+
+        // -- Inbox note (no domain required per path exemption) --
+        write(
+            root,
+            "inbox/untriaged-link.md",
+            "---\ntitle: Untriaged Link\ndate: 2026-03-18\ntype: link\norigin: assisted\ntags: []\nsource: https://example.com\n---\nPending triage.\n",
+        );
+
+        // -- Note with invalid enum values --
+        write(
+            root,
+            "bad-enums.md",
+            "---\ntitle: Bad Enums\ndate: 2026-03-18\ntype: blogpost\ndomain: tech-stuff\norigin: robot\ntags: []\n---\nThis note has invalid enum values.\n",
+        );
+
+        // -- Legacy note with deprecated fields --
+        write(
+            root,
+            "legacy-note.md",
+            "---\ntitle: Legacy Note\ndate: 2026-01-15\ntype: link\nurl: https://old-url.com\nauthor: Some Author\nduration_min: 45\nfolder: Tech\ntags:\n  - rust\n---\nThis is a legacy note with deprecated fields.\n",
         );
 
         // -- Protected file (should be skipped) --
@@ -188,7 +216,7 @@ impl TestVault {
                     ],
                     type_fields: {
                         let mut m = HashMap::new();
-                        m.insert("video".to_string(), vec!["source".to_string(), "channel".to_string()]);
+                        m.insert("video".to_string(), vec!["source".to_string(), "creator".to_string()]);
                         m.insert("meeting".to_string(), vec!["scope".to_string(), "company".to_string()]);
                         m
                     },
@@ -303,7 +331,12 @@ pub struct NoteBuilder {
     title: Option<String>,
     date: Option<String>,
     note_type: Option<String>,
+    domain: Option<String>,
+    origin: Option<String>,
+    status: Option<String>,
     tags: Option<Vec<String>>,
+    source: Option<String>,
+    creator: Option<String>,
     extra: HashMap<String, serde_yaml::Value>,
     body: String,
     raw: String,
@@ -316,7 +349,12 @@ impl NoteBuilder {
             title: None,
             date: None,
             note_type: None,
+            domain: None,
+            origin: None,
+            status: None,
             tags: None,
+            source: None,
+            creator: None,
             extra: HashMap::new(),
             body: String::new(),
             raw: String::new(),
@@ -338,8 +376,33 @@ impl NoteBuilder {
         self
     }
 
+    pub fn domain(mut self, domain: &str) -> Self {
+        self.domain = Some(domain.to_string());
+        self
+    }
+
+    pub fn origin(mut self, origin: &str) -> Self {
+        self.origin = Some(origin.to_string());
+        self
+    }
+
+    pub fn status(mut self, status: &str) -> Self {
+        self.status = Some(status.to_string());
+        self
+    }
+
     pub fn tags(mut self, tags: &[&str]) -> Self {
         self.tags = Some(tags.iter().map(|s| s.to_string()).collect());
+        self
+    }
+
+    pub fn source(mut self, source: &str) -> Self {
+        self.source = Some(source.to_string());
+        self
+    }
+
+    pub fn creator(mut self, creator: &str) -> Self {
+        self.creator = Some(creator.to_string());
         self
     }
 
@@ -365,7 +428,12 @@ impl NoteBuilder {
                 title: self.title,
                 date: self.date,
                 note_type: self.note_type,
+                domain: self.domain,
+                origin: self.origin,
+                status: self.status,
                 tags: self.tags,
+                source: self.source,
+                creator: self.creator,
                 extra: self.extra,
             },
             body: self.body,

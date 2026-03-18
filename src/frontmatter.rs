@@ -49,7 +49,12 @@ fn validate_note(note: &Note, config: &FrontmatterConfig, report: &mut Report) {
             "title" => fm.title.is_some(),
             "date" => fm.date.is_some(),
             "type" => fm.note_type.is_some(),
+            "domain" => fm.domain.is_some(),
+            "origin" => fm.origin.is_some(),
+            "status" => fm.status.is_some(),
             "tags" => fm.tags.is_some(),
+            "source" => fm.source.is_some(),
+            "creator" => fm.creator.is_some(),
             _ => fm.extra.contains_key(field),
         };
 
@@ -107,7 +112,15 @@ fn validate_note(note: &Note, config: &FrontmatterConfig, report: &mut Report) {
         && let Some(type_fields) = config.type_fields.get(note_type)
     {
         for field in type_fields {
-            if !fm.extra.contains_key(field) {
+            let present = match field.as_str() {
+                "source" => fm.source.is_some(),
+                "creator" => fm.creator.is_some(),
+                "domain" => fm.domain.is_some(),
+                "origin" => fm.origin.is_some(),
+                "status" => fm.status.is_some(),
+                _ => fm.extra.contains_key(field),
+            };
+            if !present {
                 report.add(Violation {
                     path: note.path.clone(),
                     rule: format!("frontmatter.type-field.{note_type}.{field}"),

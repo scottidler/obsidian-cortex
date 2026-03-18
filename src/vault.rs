@@ -28,7 +28,12 @@ pub struct Frontmatter {
     pub date: Option<String>,
     #[serde(rename = "type")]
     pub note_type: Option<String>,
+    pub domain: Option<String>,
+    pub origin: Option<String>,
+    pub status: Option<String>,
     pub tags: Option<Vec<String>>,
+    pub source: Option<String>,
+    pub creator: Option<String>,
     #[serde(skip)]
     pub extra: HashMap<String, serde_yaml::Value>,
 }
@@ -45,7 +50,12 @@ impl Frontmatter {
         let mut title = None;
         let mut date = None;
         let mut note_type = None;
+        let mut domain = None;
+        let mut origin = None;
+        let mut status = None;
         let mut tags = None;
+        let mut source = None;
+        let mut creator = None;
         let mut extra = HashMap::new();
 
         for (key, val) in mapping {
@@ -77,6 +87,24 @@ impl Frontmatter {
                         other => Some(format!("{other:?}")),
                     };
                 }
+                "domain" => {
+                    domain = match val {
+                        serde_yaml::Value::String(s) => Some(s),
+                        other => Some(format!("{other:?}")),
+                    };
+                }
+                "origin" => {
+                    origin = match val {
+                        serde_yaml::Value::String(s) => Some(s),
+                        other => Some(format!("{other:?}")),
+                    };
+                }
+                "status" => {
+                    status = match val {
+                        serde_yaml::Value::String(s) => Some(s),
+                        other => Some(format!("{other:?}")),
+                    };
+                }
                 "tags" => {
                     if let serde_yaml::Value::Sequence(seq) = val {
                         tags = Some(
@@ -89,6 +117,18 @@ impl Frontmatter {
                         );
                     }
                 }
+                "source" => {
+                    source = match val {
+                        serde_yaml::Value::String(s) => Some(s),
+                        other => Some(format!("{other:?}")),
+                    };
+                }
+                "creator" => {
+                    creator = match val {
+                        serde_yaml::Value::String(s) => Some(s),
+                        other => Some(format!("{other:?}")),
+                    };
+                }
                 _ => {
                     extra.insert(key_str, val);
                 }
@@ -99,12 +139,19 @@ impl Frontmatter {
             title,
             date,
             note_type,
+            domain,
+            origin,
+            status,
             tags,
+            source,
+            creator,
             extra,
         })
     }
 
     /// Serialize back to YAML string, preserving extra fields.
+    /// Fields emitted in canonical order: title, date, type, domain, origin, tags,
+    /// status, source, creator, then extra fields alphabetically.
     pub fn to_yaml(&self) -> Result<String> {
         let mut mapping = serde_yaml::Mapping::new();
 
@@ -126,6 +173,18 @@ impl Frontmatter {
                 serde_yaml::Value::String(note_type.clone()),
             );
         }
+        if let Some(ref domain) = self.domain {
+            mapping.insert(
+                serde_yaml::Value::String("domain".to_string()),
+                serde_yaml::Value::String(domain.clone()),
+            );
+        }
+        if let Some(ref origin) = self.origin {
+            mapping.insert(
+                serde_yaml::Value::String("origin".to_string()),
+                serde_yaml::Value::String(origin.clone()),
+            );
+        }
         if let Some(ref tags) = self.tags {
             let seq: Vec<serde_yaml::Value> = tags.iter().map(|t| serde_yaml::Value::String(t.clone())).collect();
             mapping.insert(
@@ -133,10 +192,32 @@ impl Frontmatter {
                 serde_yaml::Value::Sequence(seq),
             );
         }
+        if let Some(ref status) = self.status {
+            mapping.insert(
+                serde_yaml::Value::String("status".to_string()),
+                serde_yaml::Value::String(status.clone()),
+            );
+        }
+        if let Some(ref source) = self.source {
+            mapping.insert(
+                serde_yaml::Value::String("source".to_string()),
+                serde_yaml::Value::String(source.clone()),
+            );
+        }
+        if let Some(ref creator) = self.creator {
+            mapping.insert(
+                serde_yaml::Value::String("creator".to_string()),
+                serde_yaml::Value::String(creator.clone()),
+            );
+        }
 
-        // Add extra fields
-        for (key, value) in &self.extra {
-            mapping.insert(serde_yaml::Value::String(key.clone()), value.clone());
+        // Add extra fields alphabetically
+        let mut extra_keys: Vec<&String> = self.extra.keys().collect();
+        extra_keys.sort();
+        for key in extra_keys {
+            if let Some(value) = self.extra.get(key) {
+                mapping.insert(serde_yaml::Value::String(key.clone()), value.clone());
+            }
         }
 
         let yaml =
@@ -149,7 +230,12 @@ impl Frontmatter {
         self.title.is_none()
             && self.date.is_none()
             && self.note_type.is_none()
+            && self.domain.is_none()
+            && self.origin.is_none()
+            && self.status.is_none()
             && self.tags.is_none()
+            && self.source.is_none()
+            && self.creator.is_none()
             && self.extra.is_empty()
     }
 }
@@ -287,8 +373,10 @@ mod tests {
             title: Some("Test".to_string()),
             date: Some("2026-01-01".to_string()),
             note_type: Some("note".to_string()),
+            domain: Some("tech".to_string()),
+            origin: Some("authored".to_string()),
             tags: Some(vec!["rust".to_string()]),
-            extra: HashMap::new(),
+            ..Default::default()
         };
 
         let yaml = fm.to_yaml().expect("to_yaml");
