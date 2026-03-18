@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 
 use crate::config::{
     ActionsConfig, BrokenLinksConfig, Config, DaemonConfig, DuplicatesConfig, FrontmatterConfig, IntelConfig,
-    LinkingConfig, LinkingEntities, LlmConfig, NamingConfig, ScopeConfig, ScopeMatch, ScopeRule, StateConfig,
-    TagsConfig, VaultConfig,
+    LinkingConfig, LinkingEntities, LlmConfig, NamingConfig, SchemaConfig, ScopeConfig, ScopeMatch, ScopeRule,
+    StateConfig, TagsConfig, VaultConfig,
 };
 use crate::vault::{self, Frontmatter, Note};
 
@@ -201,6 +201,7 @@ impl TestVault {
         Config {
             vault: self.vault_config(),
             log_level: "warn".to_string(),
+            schema: SchemaConfig::default(),
             actions: ActionsConfig {
                 naming: NamingConfig {
                     style: "lowercase-hyphenated".to_string(),
@@ -214,6 +215,8 @@ impl TestVault {
                         "type".to_string(),
                         "tags".to_string(),
                     ],
+                    exempt: HashMap::new(),
+                    path_exempt: HashMap::new(),
                     type_fields: {
                         let mut m = HashMap::new();
                         m.insert("video".to_string(), vec!["source".to_string(), "creator".to_string()]);

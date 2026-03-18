@@ -63,9 +63,13 @@ pub fn run_lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<R
 
     if rules.contains(&"frontmatter") {
         if opts.apply {
-            frontmatter::apply_frontmatter(vault_root, &notes, &config.actions.frontmatter)?;
+            frontmatter::apply_frontmatter(vault_root, &notes, &config.actions.frontmatter, &config.schema)?;
         } else {
-            report.merge(frontmatter::lint_frontmatter(&notes, &config.actions.frontmatter));
+            report.merge(frontmatter::lint_frontmatter(
+                &notes,
+                &config.actions.frontmatter,
+                &config.schema,
+            ));
         }
     }
 

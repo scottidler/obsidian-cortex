@@ -10,6 +10,7 @@ pub struct Config {
     pub vault: VaultConfig,
     #[serde(rename = "log-level")]
     pub log_level: String,
+    pub schema: SchemaConfig,
     pub actions: ActionsConfig,
     pub state: StateConfig,
     pub daemon: DaemonConfig,
@@ -22,6 +23,7 @@ impl Default for Config {
         Self {
             vault: VaultConfig::default(),
             log_level: "info".to_string(),
+            schema: SchemaConfig::default(),
             actions: ActionsConfig::default(),
             state: StateConfig::default(),
             daemon: DaemonConfig::default(),
@@ -29,6 +31,16 @@ impl Default for Config {
             llm: LlmConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct SchemaConfig {
+    pub domains: Vec<String>,
+    pub types: Vec<String>,
+    pub origins: Vec<String>,
+    pub statuses: Vec<String>,
+    pub methods: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,6 +106,9 @@ impl Default for NamingConfig {
 #[serde(default)]
 pub struct FrontmatterConfig {
     pub required: Vec<String>,
+    pub exempt: HashMap<String, Vec<String>>,
+    #[serde(rename = "path-exempt")]
+    pub path_exempt: HashMap<String, Vec<String>>,
     #[serde(rename = "type-fields")]
     pub type_fields: HashMap<String, Vec<String>>,
     #[serde(rename = "auto-title")]
@@ -109,6 +124,8 @@ impl Default for FrontmatterConfig {
                 "type".to_string(),
                 "tags".to_string(),
             ],
+            exempt: HashMap::new(),
+            path_exempt: HashMap::new(),
             type_fields: HashMap::new(),
             auto_title: true,
         }
@@ -277,7 +294,12 @@ impl Default for DaemonConfig {
 #[derive(Debug, Deserialize, Default)]
 pub struct MigrationConfig {
     pub name: String,
+    #[serde(default)]
     pub moves: Vec<MigrationMove>,
+    #[serde(rename = "field-renames", default)]
+    pub field_renames: HashMap<String, String>,
+    #[serde(rename = "field-drops", default)]
+    pub field_drops: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

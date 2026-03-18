@@ -6,9 +6,18 @@ vault:
     - ".cortex"
     - "assets"
     - "attachments"
-  protected: []
+  protected:
+    - "system/borg-ledger.md"
+    - "system/borg-dashboard.md"
 
 log-level: info
+
+schema:
+  domains: [ai, tech, football, work, writing, music, spanish, knowledge, resources, system]
+  types: [youtube, article, github, social, book, video, research, daily, meeting, note, vocab, moc, link, poem, system]
+  origins: [authored, assisted, generated]
+  statuses: [unread, reading, reviewed, starred]
+  methods: [http, telegram, clipboard, cli, manual]
 
 actions:
   naming:
@@ -18,14 +27,21 @@ actions:
       - "^[\\p{Emoji}].*/$"
 
   frontmatter:
-    required: [title, date, type, tags]
+    required: [title, date, type, domain, origin, tags]
+    exempt:
+      daily: [domain]
+    path-exempt:
+      "inbox/**": [domain]
     type-fields:
-      video: [source, channel, url]
-      meeting: [scope, company, attendees]
-      article: [source, author]
+      youtube: [source, creator, duration]
+      video: [source, creator, duration]
+      article: [source, creator]
+      github: [source]
+      social: [source]
       research: [source]
-      book: [author]
-      link: [url]
+      book: [creator]
+      meeting: [scope, company]
+      link: [source]
     auto-title: true
 
   tags:
@@ -67,7 +83,7 @@ actions:
     daily-note: true
     weekly-review: true
     fabric-patterns: [extract_wisdom, summarize]
-    output-path: "System/ai-output"
+    output-path: "system/ai-output"
 
   duplicates:
     threshold: 0.85
@@ -89,6 +105,17 @@ daemon:
   poll-interval: 300
 
 migrations: []
+  # Example: v2 field migration for straggler legacy notes
+  # - name: v2-field-renames
+  #   field-renames:
+  #     url: source
+  #     author: creator
+  #     uploader: creator
+  #     channel: creator
+  #     duration_min: duration
+  #     trace_id: trace
+  #     folder: domain
+  #   field-drops: [day, time, ww, ref]
 
 llm:
   provider: claude

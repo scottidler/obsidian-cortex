@@ -212,6 +212,7 @@ mod tests {
                 to: "Notes/".to_string(),
                 set_frontmatter: None,
             }],
+            ..Default::default()
         };
 
         let moves = plan_migration(&notes, &migration);
@@ -231,6 +232,7 @@ mod tests {
                 to: "Notes/".to_string(),
                 set_frontmatter: None,
             }],
+            ..Default::default()
         };
 
         let moves = plan_migration(&notes, &migration);
@@ -252,6 +254,7 @@ mod tests {
                 to: "Notes/".to_string(),
                 set_frontmatter: Some(fm_set),
             }],
+            ..Default::default()
         };
 
         let moves = plan_migration(&notes, &migration);
@@ -271,6 +274,7 @@ mod tests {
                 to: "Notes/".to_string(),
                 set_frontmatter: None,
             }],
+            ..Default::default()
         }];
 
         let count = apply_migrate(v.root(), &notes, &migrations).expect("apply");
@@ -291,6 +295,7 @@ mod tests {
                 to: "Notes/".to_string(),
                 set_frontmatter: None,
             }],
+            ..Default::default()
         }];
 
         let report = lint_migrate(&notes, &migrations);
