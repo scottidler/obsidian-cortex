@@ -11,6 +11,63 @@ use crate::vault::Note;
 static WIKILINK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]").expect("valid wikilink regex"));
 
+/// Asset file extensions that indicate a genuinely broken embed/reference
+/// when the target file is missing (as opposed to an aspirational note link).
+const ASSET_EXTENSIONS: &[&str] = &[
+    // Images
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".svg",
+    ".webp",
+    ".bmp",
+    ".tiff",
+    // Documents
+    ".pdf",
+    // Media
+    ".mp4",
+    ".mp3",
+    ".wav",
+    ".webm",
+    ".ogg",
+    ".m4a",
+    // Other Obsidian embed types
+    ".csv",
+    ".excalidraw",
+];
+
+/// Check if a wikilink target refers to an asset (image, PDF, media, etc.)
+/// based on its file extension.
+fn is_asset_reference(target: &str) -> bool {
+    let lower = target.to_lowercase();
+    ASSET_EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
+}
+
+/// Strip fenced code blocks from markdown body so that wikilinks inside
+/// code blocks are not extracted. Uses line-by-line state tracking.
+fn strip_fenced_code_blocks(body: &str) -> String {
+    let mut result = String::with_capacity(body.len());
+    let mut in_fence = false;
+
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            result.push('\n');
+            continue;
+        }
+        if in_fence {
+            result.push('\n');
+        } else {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+
+    result
+}
+
 /// Run broken link detection.
 /// `lintable_notes` are checked for violations; `all_notes` are used to build
 /// the resolution indexes (so excluded files still count as valid link targets).
@@ -49,7 +106,8 @@ pub fn lint_broken_links(lintable_notes: &[Note], all_notes: &[Note], config: &B
 
     // Only check lintable notes for violations
     for note in lintable_notes {
-        let links = extract_wikilinks(&note.body);
+        let clean_body = strip_fenced_code_blocks(&note.body);
+        let links = extract_wikilinks(&clean_body);
 
         for link in links {
             let target_lower = link.to_lowercase();
@@ -62,10 +120,19 @@ pub fn lint_broken_links(lintable_notes: &[Note], all_notes: &[Note], config: &B
                 || note_stems.contains(&target_slug);
 
             if !exists {
+                // Classify unresolved links by type
+                let (rule, severity) = if is_asset_reference(&link) {
+                    ("broken-links.asset", Severity::Error)
+                } else if link.ends_with('/') {
+                    ("broken-links.folder", Severity::Error)
+                } else {
+                    ("broken-links.unresolved", Severity::Info)
+                };
+
                 report.add(Violation {
                     path: note.path.clone(),
-                    rule: "broken-links.wikilink".to_string(),
-                    severity: Severity::Error,
+                    rule: rule.to_string(),
+                    severity,
                     message: format!("broken wikilink: [[{link}]]"),
                     fix: None,
                 });
@@ -104,13 +171,14 @@ mod tests {
         let config = v.config().actions.broken_links;
 
         let report = lint_broken_links(&notes, &notes, &config);
-        // linker.md has [[nonexistent-page]] which is broken
-        assert!(
-            report
-                .violations
-                .iter()
-                .any(|vi| vi.path.to_string_lossy() == "linker.md" && vi.message.contains("nonexistent-page"))
-        );
+        // linker.md has [[nonexistent-page]] which is broken (unresolved note link)
+        let violation = report
+            .violations
+            .iter()
+            .find(|vi| vi.path.to_string_lossy() == "linker.md" && vi.message.contains("nonexistent-page"));
+        assert!(violation.is_some(), "should detect broken wikilink");
+        assert_eq!(violation.unwrap().rule, "broken-links.unresolved");
+        assert_eq!(violation.unwrap().severity, Severity::Info);
     }
 
     #[test]
@@ -217,6 +285,146 @@ mod tests {
         assert!(
             !report.violations.iter().any(|vi| vi.message.contains("readme")),
             "excluded file should still be a valid link target"
+        );
+    }
+
+    #[test]
+    fn test_strip_fenced_code_blocks() {
+        let body = "Before code\n```\n[[inside-code]]\n```\nAfter code [[outside-code]]";
+        let stripped = strip_fenced_code_blocks(body);
+        assert!(!stripped.contains("inside-code"));
+        assert!(stripped.contains("outside-code"));
+    }
+
+    #[test]
+    fn test_strip_fenced_code_blocks_with_language() {
+        let body = "Text\n```rust\nlet x = \"[[in-rust-block]]\";\n```\n[[real-link]]";
+        let stripped = strip_fenced_code_blocks(body);
+        assert!(!stripped.contains("in-rust-block"));
+        assert!(stripped.contains("real-link"));
+    }
+
+    #[test]
+    fn test_strip_fenced_code_blocks_preserves_no_fence() {
+        let body = "No code blocks here. See [[some-link]].";
+        let stripped = strip_fenced_code_blocks(body);
+        assert!(stripped.contains("some-link"));
+    }
+
+    #[test]
+    fn test_is_asset_reference() {
+        assert!(is_asset_reference("pasted-image-20240617.png"));
+        assert!(is_asset_reference("document.pdf"));
+        assert!(is_asset_reference("assets/photo.jpg"));
+        assert!(is_asset_reference("recording.mp4"));
+        assert!(is_asset_reference("drawing.excalidraw"));
+        assert!(is_asset_reference("IMAGE.PNG")); // case-insensitive
+
+        assert!(!is_asset_reference("tmux"));
+        assert!(!is_asset_reference("ThePrimeagen"));
+        assert!(!is_asset_reference("some-note"));
+        assert!(!is_asset_reference("note.md")); // .md is NOT an asset
+    }
+
+    #[test]
+    fn test_severity_asset_is_error() {
+        use crate::testutil::NoteBuilder;
+
+        let notes = vec![
+            NoteBuilder::new("test.md")
+                .title("Test")
+                .body("See ![[missing-image.png]] here.")
+                .build(),
+        ];
+        let config = BrokenLinksConfig {
+            check_wikilinks: true,
+            check_urls: false,
+        };
+
+        let report = lint_broken_links(&notes, &notes, &config);
+        let violation = report
+            .violations
+            .iter()
+            .find(|vi| vi.message.contains("missing-image.png"));
+        assert!(violation.is_some(), "should detect missing asset");
+        assert_eq!(violation.unwrap().rule, "broken-links.asset");
+        assert_eq!(violation.unwrap().severity, Severity::Error);
+    }
+
+    #[test]
+    fn test_severity_folder_is_error() {
+        use crate::testutil::NoteBuilder;
+
+        let notes = vec![
+            NoteBuilder::new("test.md")
+                .title("Test")
+                .body("See [[Old Folder/]] here.")
+                .build(),
+        ];
+        let config = BrokenLinksConfig {
+            check_wikilinks: true,
+            check_urls: false,
+        };
+
+        let report = lint_broken_links(&notes, &notes, &config);
+        let violation = report.violations.iter().find(|vi| vi.message.contains("Old Folder/"));
+        assert!(violation.is_some(), "should detect stale folder link");
+        assert_eq!(violation.unwrap().rule, "broken-links.folder");
+        assert_eq!(violation.unwrap().severity, Severity::Error);
+    }
+
+    #[test]
+    fn test_severity_unresolved_note_is_info() {
+        use crate::testutil::NoteBuilder;
+
+        let notes = vec![
+            NoteBuilder::new("test.md")
+                .title("Test")
+                .body("See [[tmux]] and [[ThePrimeagen]] here.")
+                .build(),
+        ];
+        let config = BrokenLinksConfig {
+            check_wikilinks: true,
+            check_urls: false,
+        };
+
+        let report = lint_broken_links(&notes, &notes, &config);
+        for vi in &report.violations {
+            assert_eq!(vi.rule, "broken-links.unresolved");
+            assert_eq!(vi.severity, Severity::Info);
+        }
+        assert_eq!(report.violations.len(), 2);
+    }
+
+    #[test]
+    fn test_code_block_wikilinks_skipped() {
+        use crate::testutil::NoteBuilder;
+
+        let notes = vec![
+            NoteBuilder::new("test.md")
+                .title("Test")
+                .body("Real [[nonexistent-note]] link.\n```\n[[inside-code-block]]\n```\nDone.")
+                .build(),
+        ];
+        let config = BrokenLinksConfig {
+            check_wikilinks: true,
+            check_urls: false,
+        };
+
+        let report = lint_broken_links(&notes, &notes, &config);
+        assert!(
+            !report
+                .violations
+                .iter()
+                .any(|vi| vi.message.contains("inside-code-block")),
+            "wikilinks inside code blocks should be skipped"
+        );
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|vi| vi.message.contains("nonexistent-note")),
+            "wikilinks outside code blocks should be detected"
         );
     }
 }
