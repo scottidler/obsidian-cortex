@@ -293,6 +293,36 @@ fn run_configured_actions(
                     Err(e) => tracing::error!(error = %e, "failed to scan vault for duplicates"),
                 }
             }
+            "quality" => {
+                let auto = daemon_config.should_apply("quality");
+                match crate::vault::scan_vault(vault_root, &config.vault) {
+                    Ok(notes) => {
+                        if auto {
+                            match crate::quality::apply_quality(vault_root, &notes, &config.actions.quality) {
+                                Ok(count) if count > 0 => {
+                                    let report = crate::quality::lint_quality(&notes, &config.actions.quality);
+                                    let files: Vec<String> = report
+                                        .violations
+                                        .iter()
+                                        .map(|v| v.path.to_string_lossy().to_string())
+                                        .collect();
+                                    fingerprint.add("quality", files);
+                                    tracing::info!(fixes = count, "auto-applied quality");
+                                    println!("[daemon] auto-applied quality: {count} fix(es)");
+                                }
+                                Ok(_) => {}
+                                Err(e) => tracing::error!(error = %e, "quality apply failed"),
+                            }
+                        } else {
+                            let report = crate::quality::lint_quality(&notes, &config.actions.quality);
+                            if !report.is_empty() {
+                                println!("[daemon] quality: {} violation(s)", report.violations.len());
+                            }
+                        }
+                    }
+                    Err(e) => tracing::error!(error = %e, "failed to scan vault for quality"),
+                }
+            }
             "intel" => {
                 let opts = crate::cli::IntelOpts {
                     daily: true,

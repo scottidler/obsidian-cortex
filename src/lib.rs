@@ -10,6 +10,7 @@ pub mod links;
 pub mod logging;
 pub mod migrate;
 pub mod naming;
+pub mod quality;
 pub mod report;
 pub mod scope;
 pub mod state;
@@ -153,6 +154,10 @@ pub fn run_lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<R
 
     if rules.contains(&"duplicates") {
         report.merge(duplicates::lint_duplicates(&lintable_notes, &config.actions.duplicates));
+    }
+
+    if rules.contains(&"quality") {
+        report.merge(quality::lint_quality(&lintable_notes, &config.actions.quality));
     }
 
     if opts.format == "json" {
