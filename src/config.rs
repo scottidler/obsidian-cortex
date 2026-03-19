@@ -83,6 +83,8 @@ pub struct ActionsConfig {
     #[serde(rename = "broken-links")]
     pub broken_links: BrokenLinksConfig,
     pub quality: QualityConfig,
+    #[serde(rename = "auto-tag")]
+    pub auto_tag: AutoTagConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -268,6 +270,38 @@ impl Default for DuplicatesConfig {
         Self {
             threshold: 0.85,
             same_type_only: false,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct AutoTagConfig {
+    pub enabled: bool,
+    #[serde(rename = "min-tags-threshold")]
+    pub min_tags_threshold: usize,
+    #[serde(rename = "canonical-tags")]
+    pub canonical_tags: Vec<String>,
+    #[serde(rename = "fabric-pattern")]
+    pub fabric_pattern: Option<String>,
+    #[serde(rename = "auto-derive-top-n")]
+    pub auto_derive_top_n: usize,
+    #[serde(rename = "max-input-tokens")]
+    pub max_input_tokens: usize,
+    #[serde(rename = "fabric-timeout-secs")]
+    pub fabric_timeout_secs: u64,
+}
+
+impl Default for AutoTagConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_tags_threshold: 3,
+            canonical_tags: Vec::new(),
+            fabric_pattern: None,
+            auto_derive_top_n: 50,
+            max_input_tokens: 50000,
+            fabric_timeout_secs: 30,
         }
     }
 }

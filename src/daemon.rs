@@ -293,6 +293,36 @@ fn run_configured_actions(
                     Err(e) => tracing::error!(error = %e, "failed to scan vault for duplicates"),
                 }
             }
+            "auto-tag" => {
+                let auto = daemon_config.should_apply("auto-tag");
+                match crate::vault::scan_vault(vault_root, &config.vault) {
+                    Ok(notes) => {
+                        if auto {
+                            match crate::autotag::apply_autotag(vault_root, &notes, &notes, &config.actions.auto_tag) {
+                                Ok(count) if count > 0 => {
+                                    let report = crate::autotag::lint_autotag(&notes, &notes, &config.actions.auto_tag);
+                                    let files: Vec<String> = report
+                                        .violations
+                                        .iter()
+                                        .map(|v| v.path.to_string_lossy().to_string())
+                                        .collect();
+                                    fingerprint.add("auto-tag", files);
+                                    tracing::info!(fixes = count, "auto-applied auto-tag");
+                                    println!("[daemon] auto-applied auto-tag: {count} fix(es)");
+                                }
+                                Ok(_) => {}
+                                Err(e) => tracing::error!(error = %e, "auto-tag apply failed"),
+                            }
+                        } else {
+                            let report = crate::autotag::lint_autotag(&notes, &notes, &config.actions.auto_tag);
+                            if !report.is_empty() {
+                                println!("[daemon] auto-tag: {} suggestion(s)", report.violations.len());
+                            }
+                        }
+                    }
+                    Err(e) => tracing::error!(error = %e, "failed to scan vault for auto-tag"),
+                }
+            }
             "quality" => {
                 let auto = daemon_config.should_apply("quality");
                 match crate::vault::scan_vault(vault_root, &config.vault) {

@@ -1,3 +1,4 @@
+pub mod autotag;
 pub mod cli;
 pub mod config;
 pub mod daemon;

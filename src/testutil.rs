@@ -12,9 +12,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::{
-    ActionsConfig, BrokenLinksConfig, Config, DaemonConfig, DuplicatesConfig, FrontmatterConfig, IntelConfig,
-    LinkingConfig, LinkingEntities, LlmConfig, NamingConfig, QualityConfig, SchemaConfig, ScopeConfig, ScopeMatch,
-    ScopeRule, StateConfig, TagsConfig, VaultConfig,
+    ActionsConfig, AutoTagConfig, BrokenLinksConfig, Config, DaemonConfig, DuplicatesConfig, FrontmatterConfig,
+    IntelConfig, LinkingConfig, LinkingEntities, LlmConfig, NamingConfig, QualityConfig, SchemaConfig, ScopeConfig,
+    ScopeMatch, ScopeRule, StateConfig, TagsConfig, VaultConfig,
 };
 use crate::vault::{self, Frontmatter, Note};
 
@@ -302,6 +302,10 @@ impl TestVault {
                     check_urls: false,
                 },
                 quality: QualityConfig { min_word_count: 50 },
+                auto_tag: AutoTagConfig {
+                    enabled: false,
+                    ..AutoTagConfig::default()
+                },
             },
             state: StateConfig {
                 cache_dir: ".cortex".to_string(),
