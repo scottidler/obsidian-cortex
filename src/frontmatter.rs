@@ -296,6 +296,11 @@ pub fn apply_frontmatter(
                     && let serde_yaml::Value::String(title) = value
                     && let Some(pos) = content.find("---\n")
                 {
+                    // Don't insert if a title field already exists (YAML parse may have failed)
+                    if content.contains("\ntitle:") || content.starts_with("title:") {
+                        tracing::debug!(path = %note.path.display(), "skipping title insert: field already exists in raw content");
+                        continue;
+                    }
                     let insert_pos = pos + 4;
                     content.insert_str(insert_pos, &format!("title: {title}\n"));
                     modified = true;

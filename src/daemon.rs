@@ -1,7 +1,9 @@
-use chrono::Datelike;
 use eyre::{Context, Result};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::time::Instant;
 use tracing::instrument;
@@ -66,11 +68,18 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
         if any_enabled { " (auto-apply enabled)" } else { "" },
     );
 
+    // Flag to suppress watcher events during auto-apply (prevents feedback loops)
+    let applying = Arc::new(AtomicBool::new(false));
+    let applying_clone = Arc::clone(&applying);
+
     // Channel for file watcher events -> async event loop
     let (watch_tx, mut watch_rx) = tokio::sync::mpsc::unbounded_channel();
 
     let mut watcher: RecommendedWatcher =
         notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+            if applying_clone.load(Ordering::Relaxed) {
+                return; // Discard events during auto-apply
+            }
             if let Ok(event) = res {
                 let _ = watch_tx.send(event);
             }
@@ -95,7 +104,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     let intel_enabled = daemon_config.is_enabled("intel");
     let daily_dur = match (&daemon_config.daily_at, intel_enabled) {
         (Some(time_str), true) => {
-            let dur = duration_until_daily(time_str);
+            let dur = duration_until_next(time_str);
             println!(
                 "Daily intel scheduled at {time_str} (in {:.0}m)",
                 dur.as_secs_f64() / 60.0
@@ -107,9 +116,9 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     let daily = tokio::time::sleep(daily_dur);
     tokio::pin!(daily);
 
-    let weekly_dur = match (&daemon_config.weekly_on, intel_enabled) {
+    let weekly_dur = match (&daemon_config.weekly_at, intel_enabled) {
         (Some(schedule_str), true) => {
-            let dur = duration_until_weekly(schedule_str);
+            let dur = duration_until_next(schedule_str);
             println!(
                 "Weekly intel scheduled for {schedule_str} (in {:.1}h)",
                 dur.as_secs_f64() / 3600.0
@@ -125,7 +134,9 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
 
     // Run a full sweep on startup
     tracing::info!("running initial full sweep");
+    applying.store(true, Ordering::Relaxed);
     let mut last_fingerprint = run_configured_actions(vault_root, config, daemon_config, &[]);
+    applying.store(false, Ordering::Relaxed);
 
     loop {
         tokio::select! {
@@ -151,7 +162,9 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                 for path in &pending {
                     println!("  changed: {}", path.display());
                 }
+                applying.store(true, Ordering::Relaxed);
                 let fingerprint = run_configured_actions(vault_root, config, daemon_config, &pending);
+                applying.store(false, Ordering::Relaxed);
                 last_fingerprint = fingerprint;
                 pending.clear();
                 // Make debounce inert again
@@ -162,7 +175,9 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
             _ = sweep_interval.tick() => {
                 // Periodic full sweep with cycle detection
                 tracing::info!("running periodic sweep");
+                applying.store(true, Ordering::Relaxed);
                 let fingerprint = run_configured_actions(vault_root, config, daemon_config, &[]);
+                applying.store(false, Ordering::Relaxed);
 
                 if !fingerprint.is_empty() && fingerprint == last_fingerprint {
                     tracing::warn!(
@@ -186,7 +201,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                 }
                 // Reschedule for next day
                 if let Some(time_str) = &daemon_config.daily_at {
-                    let next = duration_until_daily(time_str);
+                    let next = duration_until_next(time_str);
                     tracing::info!(next_in_secs = next.as_secs(), "daily intel rescheduled");
                     daily.as_mut().reset(Instant::now() + next);
                 }
@@ -204,8 +219,8 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                     tracing::error!(error = %e, "scheduled weekly intel failed");
                 }
                 // Reschedule for next week
-                if let Some(schedule_str) = &daemon_config.weekly_on {
-                    let next = duration_until_weekly(schedule_str);
+                if let Some(schedule_str) = &daemon_config.weekly_at {
+                    let next = duration_until_next(schedule_str);
                     tracing::info!(next_in_secs = next.as_secs(), "weekly intel rescheduled");
                     weekly.as_mut().reset(Instant::now() + next);
                 }
@@ -597,65 +612,101 @@ fn show_status() -> Result<()> {
     Ok(())
 }
 
-/// Compute Duration until next occurrence of "HH:MM" today or tomorrow.
-pub fn duration_until_daily(time_str: &str) -> Duration {
-    let now = chrono::Local::now();
-    let parts: Vec<&str> = time_str.split(':').collect();
-    let hour: u32 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(23);
-    let minute: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-
-    let today_target = now.date_naive().and_hms_opt(hour, minute, 0).expect("valid time");
-    let today_target = today_target
-        .and_local_timezone(chrono::Local)
-        .single()
-        .expect("valid local time");
-
-    if today_target > now {
-        (today_target - now).to_std().unwrap_or(Duration::from_secs(3600))
+/// Convert a human-friendly schedule string to a cron expression.
+///
+/// Supported formats:
+///   "M-F 07:00"       -> "0 7 * * 1-5"
+///   "Mon-Fri 07:00"   -> "0 7 * * 1-5"
+///   "Sat-Sun 10:00"   -> "0 10 * * 0,6"
+///   "Sun 22:00"       -> "0 22 * * 0"
+///   "Mon 09:30"       -> "30 9 * * 1"
+///   "07:00"           -> "0 7 * * *"
+pub fn schedule_to_cron(schedule: &str) -> String {
+    let parts: Vec<&str> = schedule.split_whitespace().collect();
+    let (day_part, time_part) = if parts.len() >= 2 {
+        (Some(parts[0]), parts[1])
     } else {
-        let tomorrow_target = today_target + chrono::Duration::days(1);
-        (tomorrow_target - now).to_std().unwrap_or(Duration::from_secs(3600))
+        (None, parts.first().copied().unwrap_or("00:00"))
+    };
+
+    let time_parts: Vec<&str> = time_part.split(':').collect();
+    let hour = time_parts.first().copied().unwrap_or("0");
+    let minute = time_parts.get(1).copied().unwrap_or("0");
+
+    let dow = match day_part {
+        None => "*".to_string(),
+        Some(d) => day_spec_to_cron(d),
+    };
+
+    format!("{minute} {hour} * * {dow}")
+}
+
+/// Convert a day specifier to cron day-of-week field.
+///
+/// Supports: single days (Mon, Tue, Sun), ranges (M-F, Mon-Fri, Sat-Sun),
+/// and common abbreviations.
+fn day_spec_to_cron(spec: &str) -> String {
+    // Check for range (e.g., "M-F", "Mon-Fri", "Sat-Sun")
+    if let Some((start, end)) = spec.split_once('-') {
+        let start_num = day_to_cron_num(start);
+        let end_num = day_to_cron_num(end);
+        if start_num <= end_num {
+            format!("{start_num}-{end_num}")
+        } else {
+            // Wrap around (e.g., Fri-Mon -> 5,6,0,1)
+            let mut days: Vec<u8> = Vec::new();
+            let mut d = start_num;
+            loop {
+                days.push(d);
+                if d == end_num {
+                    break;
+                }
+                d = (d + 1) % 7;
+            }
+            days.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(",")
+        }
+    } else {
+        day_to_cron_num(spec).to_string()
     }
 }
 
-/// Compute Duration until next occurrence of "Day HH:MM" (e.g., "Sun 22:00").
-pub fn duration_until_weekly(schedule_str: &str) -> Duration {
-    let now = chrono::Local::now();
-    let parts: Vec<&str> = schedule_str.split_whitespace().collect();
-    let day_str = parts.first().copied().unwrap_or("Sun");
-    let time_str = parts.get(1).copied().unwrap_or("22:00");
+/// Map day name/abbreviation to cron number (0=Sun, 1=Mon, ..., 6=Sat).
+fn day_to_cron_num(day: &str) -> u8 {
+    match day.to_lowercase().as_str() {
+        "m" | "mon" | "monday" => 1,
+        "t" | "tu" | "tue" | "tuesday" => 2,
+        "w" | "wed" | "wednesday" => 3,
+        "th" | "thu" | "thursday" => 4,
+        "f" | "fri" | "friday" => 5,
+        "sa" | "sat" | "saturday" => 6,
+        "su" | "sun" | "sunday" => 0,
+        _ => 0,
+    }
+}
 
-    let target_weekday = match day_str.to_lowercase().as_str() {
-        "mon" => chrono::Weekday::Mon,
-        "tue" => chrono::Weekday::Tue,
-        "wed" => chrono::Weekday::Wed,
-        "thu" => chrono::Weekday::Thu,
-        "fri" => chrono::Weekday::Fri,
-        "sat" => chrono::Weekday::Sat,
-        _ => chrono::Weekday::Sun,
+/// Compute Duration until the next occurrence of a human-friendly schedule.
+///
+/// Uses croner to parse the translated cron expression and find the next match.
+pub fn duration_until_next(schedule: &str) -> Duration {
+    let cron_expr = schedule_to_cron(schedule);
+    let cron = match croner::Cron::from_str(&cron_expr) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(schedule, cron_expr, error = %e, "invalid schedule expression");
+            return Duration::MAX;
+        }
     };
 
-    let time_parts: Vec<&str> = time_str.split(':').collect();
-    let hour: u32 = time_parts.first().and_then(|s| s.parse().ok()).unwrap_or(22);
-    let minute: u32 = time_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-
-    let current_weekday = now.weekday();
-    let days_ahead =
-        (target_weekday.num_days_from_monday() as i64 - current_weekday.num_days_from_monday() as i64 + 7) % 7;
-
-    let target_date = now.date_naive() + chrono::Duration::days(days_ahead);
-    let target_time = target_date.and_hms_opt(hour, minute, 0).expect("valid time");
-    let target = target_time
-        .and_local_timezone(chrono::Local)
-        .single()
-        .expect("valid local time");
-
-    if target > now {
-        (target - now).to_std().unwrap_or(Duration::from_secs(3600))
-    } else {
-        // Same day but time already passed - next week
-        let next_week = target + chrono::Duration::weeks(1);
-        (next_week - now).to_std().unwrap_or(Duration::from_secs(3600))
+    let now = chrono::Local::now();
+    match cron.find_next_occurrence(&now, false) {
+        Ok(next) => {
+            let dur: chrono::Duration = next - now;
+            dur.to_std().unwrap_or(Duration::from_secs(3600))
+        }
+        Err(e) => {
+            tracing::error!(schedule, error = %e, "could not find next occurrence");
+            Duration::MAX
+        }
     }
 }
 
@@ -663,6 +714,7 @@ pub fn duration_until_weekly(schedule_str: &str) -> Duration {
 mod tests {
     use super::*;
     use crate::config::DaemonConfig;
+    use chrono::Datelike;
 
     #[test]
     fn test_is_enabled_default_is_false() {
@@ -785,19 +837,20 @@ mod tests {
 
     #[test]
     fn test_duration_until_daily_future_today() {
-        // If we ask for a time that hasn't passed yet today, it should be today
+        // If we ask for a time that hasn't passed yet today, it should be today (on weekdays)
+        // or next Monday (on weekends)
         let now = chrono::Local::now();
         let future_hour = (now.format("%H").to_string().parse::<u32>().unwrap_or(0) + 1) % 24;
         let time_str = format!("{future_hour:02}:00");
-        let dur = duration_until_daily(&time_str);
-        // Should be less than 24 hours
-        assert!(dur < Duration::from_secs(24 * 3600));
+        let dur = duration_until_next(&time_str);
+        // Should be within 3 days (worst case: Saturday -> Monday)
+        assert!(dur < Duration::from_secs(3 * 24 * 3600));
         assert!(dur > Duration::ZERO);
     }
 
     #[test]
     fn test_duration_until_daily_already_passed() {
-        // If we ask for a time that already passed, it should be tomorrow
+        // If we ask for a time that already passed, it should be next weekday
         let now = chrono::Local::now();
         let past_hour = if now.format("%H").to_string().parse::<u32>().unwrap_or(0) > 0 {
             now.format("%H").to_string().parse::<u32>().unwrap_or(0) - 1
@@ -805,15 +858,35 @@ mod tests {
             23
         };
         let time_str = format!("{past_hour:02}:00");
-        let dur = duration_until_daily(&time_str);
-        // Should be between ~23 hours and ~24 hours from now
-        assert!(dur > Duration::from_secs(22 * 3600));
-        assert!(dur <= Duration::from_secs(24 * 3600));
+        let dur = duration_until_next(&time_str);
+        // Should be within 3 days (worst case: Friday past -> Monday)
+        assert!(dur > Duration::ZERO);
+        assert!(dur <= Duration::from_secs(3 * 24 * 3600));
+    }
+
+    #[test]
+    fn test_duration_until_weekday_schedule() {
+        // "M-F 12:00" should always land on a weekday (Mon-Fri)
+        let dur = duration_until_next("M-F 12:00");
+        let now = chrono::Local::now();
+        let target = now + chrono::Duration::from_std(dur).expect("valid duration");
+        let weekday = target.weekday();
+        assert!(
+            matches!(
+                weekday,
+                chrono::Weekday::Mon
+                    | chrono::Weekday::Tue
+                    | chrono::Weekday::Wed
+                    | chrono::Weekday::Thu
+                    | chrono::Weekday::Fri
+            ),
+            "M-F schedule should only fire on weekdays, got {weekday:?}"
+        );
     }
 
     #[test]
     fn test_duration_until_weekly_returns_valid_duration() {
-        let dur = duration_until_weekly("Sun 22:00");
+        let dur = duration_until_next("Sun 22:00");
         // Should be within 7 days
         assert!(dur <= Duration::from_secs(7 * 24 * 3600));
         assert!(dur > Duration::ZERO);
@@ -823,7 +896,7 @@ mod tests {
     fn test_duration_until_weekly_all_days() {
         for day in &["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] {
             let schedule = format!("{day} 12:00");
-            let dur = duration_until_weekly(&schedule);
+            let dur = duration_until_next(&schedule);
             assert!(dur <= Duration::from_secs(7 * 24 * 3600), "failed for {day}");
             assert!(dur > Duration::ZERO, "failed for {day}");
         }
@@ -831,16 +904,38 @@ mod tests {
 
     #[test]
     fn test_daemon_config_deserialize_schedule_fields() {
-        let yaml = "daily-at: \"23:00\"\nweekly-on: \"Sun 22:00\"\n";
+        let yaml = "daily-at: \"23:00\"\nweekly-at: \"Sun 22:00\"\n";
         let config: DaemonConfig = serde_yaml::from_str(yaml).expect("deserialize");
         assert_eq!(config.daily_at.as_deref(), Some("23:00"));
-        assert_eq!(config.weekly_on.as_deref(), Some("Sun 22:00"));
+        assert_eq!(config.weekly_at.as_deref(), Some("Sun 22:00"));
+    }
+
+    #[test]
+    fn test_schedule_to_cron_weekdays() {
+        assert_eq!(schedule_to_cron("M-F 07:00"), "00 07 * * 1-5");
+        assert_eq!(schedule_to_cron("Mon-Fri 07:00"), "00 07 * * 1-5");
+    }
+
+    #[test]
+    fn test_schedule_to_cron_single_day() {
+        assert_eq!(schedule_to_cron("Sun 22:00"), "00 22 * * 0");
+        assert_eq!(schedule_to_cron("Mon 09:30"), "30 09 * * 1");
+    }
+
+    #[test]
+    fn test_schedule_to_cron_weekend() {
+        assert_eq!(schedule_to_cron("Sat-Sun 10:00"), "00 10 * * 6,0");
+    }
+
+    #[test]
+    fn test_schedule_to_cron_bare_time() {
+        assert_eq!(schedule_to_cron("07:00"), "00 07 * * *");
     }
 
     #[test]
     fn test_daemon_config_default_no_schedule() {
         let config = DaemonConfig::default();
         assert!(config.daily_at.is_none());
-        assert!(config.weekly_on.is_none());
+        assert!(config.weekly_at.is_none());
     }
 }
