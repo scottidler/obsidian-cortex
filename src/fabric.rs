@@ -60,12 +60,8 @@ pub fn run_pattern(pattern: &str, input: &str, timeout_secs: u64) -> Result<Stri
 
 /// Check if fabric is available on the system.
 pub fn is_available() -> bool {
-    Command::new("fabric")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    // Just check if the binary exists on PATH - don't invoke it, some subcommands hang
+    which::which("fabric").is_ok()
 }
 
 /// Truncate input text to approximately max_tokens (estimated at ~4 chars per token).

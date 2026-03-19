@@ -249,10 +249,10 @@ impl Default for IntelConfig {
             fabric_patterns: vec!["extract_wisdom".to_string(), "summarize".to_string()],
             output_path: "system/ai-output".to_string(),
             on_new_note: Some("extract_wisdom".to_string()),
-            batch_daily: Some("summarize".to_string()),
-            batch_weekly: Some("extract_wisdom".to_string()),
+            batch_daily: Some("daily_digest".to_string()),
+            batch_weekly: Some("weekly_digest".to_string()),
             max_input_tokens: 50000,
-            fabric_timeout_secs: 30,
+            fabric_timeout_secs: 120,
         }
     }
 }
@@ -303,7 +303,7 @@ impl Default for AutoTagConfig {
             fabric_pattern: None,
             auto_derive_top_n: 50,
             max_input_tokens: 50000,
-            fabric_timeout_secs: 30,
+            fabric_timeout_secs: 120,
         }
     }
 }
@@ -365,8 +365,8 @@ pub struct DaemonConfig {
     pub poll_interval: u64,
     #[serde(rename = "daily-at")]
     pub daily_at: Option<String>,
-    #[serde(rename = "weekly-on")]
-    pub weekly_on: Option<String>,
+    #[serde(rename = "weekly-at")]
+    pub weekly_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -398,7 +398,7 @@ impl Default for DaemonConfig {
             watch: "notify".to_string(),
             poll_interval: 300,
             daily_at: None,
-            weekly_on: None,
+            weekly_at: None,
         }
     }
 }

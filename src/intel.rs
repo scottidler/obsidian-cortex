@@ -88,12 +88,15 @@ pub fn process_new_notes(vault_root: &Path, notes: &[Note], config: &IntelConfig
 }
 
 /// Generate a daily digest note.
+///
+/// Collects notes from the previous day (yesterday's ingestions) and summarizes them.
 fn generate_daily_digest(vault_root: &Path, notes: &[Note], config: &IntelConfig, opts: &IntelOpts) -> Result<()> {
+    let yesterday = Local::now().date_naive() - chrono::Duration::days(1);
+    let yesterday_str = yesterday.format("%Y-%m-%d").to_string();
     let today = Local::now().format("%Y-%m-%d").to_string();
-    tracing::info!(date = %today, "generating daily digest");
+    tracing::info!(covering = %yesterday_str, "generating daily digest");
 
-    // Find notes modified today
-    let today_date = Local::now().date_naive();
+    // Find notes from yesterday (the day being digested)
     let recent_notes: Vec<&Note> = notes
         .iter()
         .filter(|n| {
@@ -101,7 +104,7 @@ fn generate_daily_digest(vault_root: &Path, notes: &[Note], config: &IntelConfig
                 .date
                 .as_ref()
                 .and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
-                == Some(today_date)
+                == Some(yesterday)
         })
         .collect();
 
@@ -126,9 +129,9 @@ fn generate_daily_digest(vault_root: &Path, notes: &[Note], config: &IntelConfig
     ));
     digest.push_str(&format!("# Daily Digest - {today}\n\n"));
 
-    digest.push_str("## Notes Today\n\n");
+    digest.push_str("## Notes\n\n");
     if recent_notes.is_empty() {
-        digest.push_str("No notes created or updated today.\n\n");
+        digest.push_str(&format!("No notes ingested on {yesterday_str}.\n\n"));
     } else {
         for note in &recent_notes {
             let title = note
@@ -151,19 +154,23 @@ fn generate_daily_digest(vault_root: &Path, notes: &[Note], config: &IntelConfig
     }
 
     digest.push_str(&format!(
-        "## Stats\n\n- Total vault notes: {}\n- Notes today: {}\n",
+        "## Stats\n\n- Total vault notes: {}\n- Notes on {}: {}\n",
         notes.len(),
+        yesterday_str,
         recent_notes.len()
     ));
 
-    // Fabric enhancement: summarize today's notes
+    // Fabric enhancement: synthesize across all of yesterday's notes
     if let Some(ref pattern) = config.batch_daily
         && crate::fabric::is_available()
         && !recent_notes.is_empty()
     {
         let concatenated: String = recent_notes
             .iter()
-            .map(|n| n.body.as_str())
+            .map(|n| {
+                let title = n.frontmatter.title.as_deref().unwrap_or("Untitled");
+                format!("# {title}\n\n{}", n.body)
+            })
             .collect::<Vec<_>>()
             .join("\n\n---\n\n");
         let input = crate::fabric::truncate_input(&concatenated, config.max_input_tokens);
@@ -270,14 +277,17 @@ fn generate_weekly_review(vault_root: &Path, notes: &[Note], config: &IntelConfi
         review.push('\n');
     }
 
-    // Fabric enhancement: extract wisdom from week's notes
+    // Fabric enhancement: synthesize across all of the week's notes
     if let Some(ref pattern) = config.batch_weekly
         && crate::fabric::is_available()
         && !week_notes.is_empty()
     {
         let concatenated: String = week_notes
             .iter()
-            .map(|n| n.body.as_str())
+            .map(|n| {
+                let title = n.frontmatter.title.as_deref().unwrap_or("Untitled");
+                format!("# {title}\n\n{}", n.body)
+            })
             .collect::<Vec<_>>()
             .join("\n\n---\n\n");
         let input = crate::fabric::truncate_input(&concatenated, config.max_input_tokens);

@@ -34,7 +34,7 @@ The immediate need is daily/weekly intel generation at configurable times (e.g.,
 
 ### Non-Goals
 
-- Cron expression syntax (too complex for our needs)
+- Exposing raw cron expression syntax to users (translated internally via croner)
 - Multiple daily/weekly schedules (one of each is sufficient)
 - Changing the action execution logic (`run_configured_actions` stays the same)
 - Async action execution (actions still run synchronously, only the event loop is async)
@@ -69,7 +69,7 @@ let mut debounce = tokio::time::sleep(Duration::MAX); // inert until event
 tokio::pin!(debounce);
 let mut daily = tokio::time::sleep(duration_until_daily(&config.daily_at));
 tokio::pin!(daily);
-let mut weekly = tokio::time::sleep(duration_until_weekly(&config.weekly_on));
+let mut weekly = tokio::time::sleep(duration_until_weekly(&config.weekly_at));
 tokio::pin!(weekly);
 let mut pending: Vec<PathBuf> = Vec::new();
 
@@ -98,7 +98,7 @@ loop {
         _ = &mut weekly => {
             // Weekly intel
             run_intel(vault_root, config, &IntelOpts { weekly: true, .. });
-            weekly.as_mut().reset(Instant::now() + duration_until_weekly(&config.weekly_on));
+            weekly.as_mut().reset(Instant::now() + duration_until_weekly(&config.weekly_at));
         }
         _ = tokio::signal::ctrl_c() => break,
     }
@@ -111,9 +111,9 @@ loop {
 
 **Sweep interval:** `tokio::time::interval(poll_interval)`. Fires every N seconds regardless of other activity. Runs full sweep with cycle detection.
 
-**Daily timer:** Compute `Duration` until next occurrence of configured time (e.g., 23:00 today, or 23:00 tomorrow if already past). After firing, recompute for next day. Uses `tokio::time::sleep()`.
+**Daily timer:** Uses human-friendly schedule format (e.g., "M-F 07:00") translated to cron via `schedule_to_cron()` and resolved via `croner` crate's `find_next_occurrence()`. After firing, recompute for next occurrence. Uses `tokio::time::sleep()`.
 
-**Weekly timer:** Same pattern but computes duration until next configured day+time (e.g., next Sunday 22:00). After firing, recompute for next week.
+**Weekly timer:** Same pattern - e.g., "Sun 22:00" is translated to cron "0 22 * * 0" and resolved via croner. After firing, recompute for next week.
 
 ### Config Changes
 
@@ -121,8 +121,8 @@ loop {
 daemon:
   debounce-secs: 5
   poll-interval: 300
-  daily-at: "23:00"        # daily intel fires at 11pm local
-  weekly-on: "Sun 22:00"   # weekly intel fires Sunday 10pm local
+  daily-at: "M-F 07:00"    # daily intel fires at 7am local, weekdays only
+  weekly-at: "Sun 22:00"   # weekly intel fires Sunday 10pm local
   actions:
     lint:
       enable: true
@@ -137,7 +137,7 @@ daemon:
       enable: true
 ```
 
-Schedule fields are top-level daemon config. The `intel` action's `enable` flag controls whether intel runs at all. The `daily-at` and `weekly-on` fields control when. If `intel` is enabled but no schedule is set, intel runs on the periodic sweep (existing behavior).
+Schedule fields are top-level daemon config. The `intel` action's `enable` flag controls whether intel runs at all. The `daily-at` and `weekly-at` fields control when. If `intel` is enabled but no schedule is set, intel runs on the periodic sweep (existing behavior).
 
 ### Data Model
 
@@ -154,9 +154,9 @@ pub struct DaemonConfig {
     #[serde(rename = "poll-interval")]
     pub poll_interval: u64,
     #[serde(rename = "daily-at")]
-    pub daily_at: Option<String>,     // "HH:MM" - when to run daily intel
-    #[serde(rename = "weekly-on")]
-    pub weekly_on: Option<String>,    // "Day HH:MM" - when to run weekly intel
+    pub daily_at: Option<String>,     // "M-F 07:00" or "Mon-Fri 07:00" or bare "07:00"
+    #[serde(rename = "weekly-at")]
+    pub weekly_at: Option<String>,    // "Sun 22:00" or "Sat-Sun 10:00"
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -169,11 +169,11 @@ pub struct DaemonAction {
 Helper functions:
 
 ```rust
-/// Compute Duration until next occurrence of "HH:MM" today or tomorrow.
-fn duration_until_daily(time_str: &str) -> Duration
+/// Translate human-friendly schedule to cron: "M-F 07:00" -> "0 7 * * 1-5"
+pub fn schedule_to_cron(schedule: &str) -> String
 
-/// Compute Duration until next occurrence of "Day HH:MM".
-fn duration_until_weekly(schedule_str: &str) -> Duration
+/// Compute Duration until next occurrence using croner crate.
+pub fn duration_until_next(schedule: &str) -> Duration
 ```
 
 **Entry point:** `main()` gains `#[tokio::main]` attribute. Non-daemon commands (lint, intel, etc.) run synchronously inside the async runtime - no change to their behavior.
@@ -191,7 +191,7 @@ Convert `start_watching` from sync to async. Replace `mpsc::channel` + `recv_tim
 
 **Phase 2: Scheduled intel timers**
 
-Add `daily_timer` and `weekly_timer` to the select loop. Parse `daily-at` and `weekly-on` from config. Compute initial sleep duration, fire intel, recompute for next occurrence.
+Add `daily_timer` and `weekly_timer` to the select loop. Parse `daily-at` and `weekly-at` from config. Compute initial sleep duration, fire intel, recompute for next occurrence.
 
 **Phase 3: Simplify suppression**
 
@@ -227,6 +227,7 @@ Drop the `AtomicBool` applying flag. Since the select loop runs in a single toki
 - **tokio** - already in Cargo.toml with `full` features
 - **notify** - already used, has async-compatible API (watcher callback sends to tokio channel)
 - **chrono** - already used, needed for time-of-day parsing
+- **croner** - cron expression parser with `find_next_occurrence()` API, handles DST and date math
 
 ### Performance
 
@@ -259,7 +260,7 @@ Single commit per phase. Phase 1 is a pure refactor (behavior unchanged). Phase 
 ## Open Questions
 
 - [x] Should intel run on sweep interval if no schedule is set? **Yes, preserves backward compat**
-- [x] Should daily-at/weekly-on be specific to intel, or generic for any action? **Specific to intel for now, on DaemonConfig. Can generalize later if needed.**
+- [x] Should daily-at/weekly-at be specific to intel, or generic for any action? **Specific to intel for now, on DaemonConfig. Can generalize later if needed.**
 - [x] Should we persist last-run timestamps to `.cortex/` for crash recovery? **Yes - write `.cortex/intel-last-daily` and `.cortex/intel-last-weekly` after each run. On startup, if timestamp is stale, fire immediately.**
 - [x] UTC or local time for schedule config? **Local time. Users think in local time. DST edge cases are rare and low-impact (worst case: fires an hour early/late twice a year).**
 
