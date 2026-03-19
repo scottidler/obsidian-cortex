@@ -91,6 +91,36 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     let debounce = tokio::time::sleep(Duration::MAX);
     tokio::pin!(debounce);
 
+    // Scheduled intel timers
+    let intel_enabled = daemon_config.is_enabled("intel");
+    let daily_dur = match (&daemon_config.daily_at, intel_enabled) {
+        (Some(time_str), true) => {
+            let dur = duration_until_daily(time_str);
+            println!(
+                "Daily intel scheduled at {time_str} (in {:.0}m)",
+                dur.as_secs_f64() / 60.0
+            );
+            dur
+        }
+        _ => Duration::MAX, // inert
+    };
+    let daily = tokio::time::sleep(daily_dur);
+    tokio::pin!(daily);
+
+    let weekly_dur = match (&daemon_config.weekly_on, intel_enabled) {
+        (Some(schedule_str), true) => {
+            let dur = duration_until_weekly(schedule_str);
+            println!(
+                "Weekly intel scheduled for {schedule_str} (in {:.1}h)",
+                dur.as_secs_f64() / 3600.0
+            );
+            dur
+        }
+        _ => Duration::MAX, // inert
+    };
+    let weekly = tokio::time::sleep(weekly_dur);
+    tokio::pin!(weekly);
+
     let mut pending: Vec<PathBuf> = Vec::new();
 
     // Run a full sweep on startup
@@ -141,6 +171,44 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                     );
                 }
                 last_fingerprint = fingerprint;
+            }
+            () = &mut daily => {
+                // Scheduled daily intel
+                tracing::info!("running scheduled daily intel");
+                println!("[daemon] running scheduled daily intel");
+                let opts = crate::cli::IntelOpts {
+                    daily: true,
+                    weekly: false,
+                    output: None,
+                };
+                if let Err(e) = crate::run_intel(vault_root, config, &opts) {
+                    tracing::error!(error = %e, "scheduled daily intel failed");
+                }
+                // Reschedule for next day
+                if let Some(time_str) = &daemon_config.daily_at {
+                    let next = duration_until_daily(time_str);
+                    tracing::info!(next_in_secs = next.as_secs(), "daily intel rescheduled");
+                    daily.as_mut().reset(Instant::now() + next);
+                }
+            }
+            () = &mut weekly => {
+                // Scheduled weekly intel
+                tracing::info!("running scheduled weekly intel");
+                println!("[daemon] running scheduled weekly intel");
+                let opts = crate::cli::IntelOpts {
+                    daily: false,
+                    weekly: true,
+                    output: None,
+                };
+                if let Err(e) = crate::run_intel(vault_root, config, &opts) {
+                    tracing::error!(error = %e, "scheduled weekly intel failed");
+                }
+                // Reschedule for next week
+                if let Some(schedule_str) = &daemon_config.weekly_on {
+                    let next = duration_until_weekly(schedule_str);
+                    tracing::info!(next_in_secs = next.as_secs(), "weekly intel rescheduled");
+                    weekly.as_mut().reset(Instant::now() + next);
+                }
             }
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("received shutdown signal");
