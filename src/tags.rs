@@ -130,14 +130,22 @@ pub fn apply_tags(vault_root: &Path, notes: &[Note], config: &TagsConfig) -> eyr
     Ok(fixed_count)
 }
 
-/// Check if a tag is valid lowercase-hyphenated format.
+/// Check if a tag is valid lowercase-hyphenated format (unicode-aware).
+/// Accepts: lowercase letters, caseless scripts (Hebrew, CJK, etc.), digits, hyphens.
 fn is_valid_tag(tag: &str) -> bool {
     if tag.is_empty() {
         return false;
     }
-    tag.chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        && !tag.starts_with('-')
+    tag.chars().all(|c| {
+        if c == '-' || c.is_ascii_digit() {
+            return true;
+        }
+        if !c.is_alphabetic() {
+            return false;
+        }
+        // Accept lowercase OR caseless scripts (Hebrew, Arabic, CJK, etc.)
+        c.is_lowercase() || !c.is_uppercase()
+    }) && !tag.starts_with('-')
         && !tag.ends_with('-')
         && !tag.contains("--")
 }
