@@ -23,6 +23,10 @@ pub fn lint_linking(notes: &[Note], config: &LinkingConfig) -> Report {
         .filter_map(|n| {
             let stem = n.path.file_stem()?.to_str()?.to_string();
             let title = n.frontmatter.title.clone().unwrap_or_else(|| stem.clone());
+            // Skip notes with empty titles (e.g. template stubs)
+            if title.is_empty() {
+                return None;
+            }
             Some((stem, title))
         })
         .collect();

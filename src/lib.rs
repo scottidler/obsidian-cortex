@@ -244,7 +244,13 @@ pub fn run_migrate(vault_root: &Path, config: &Config, opts: &MigrateOpts) -> Re
 #[instrument(skip(config, opts), fields(vault_root = %vault_root.display()))]
 pub fn run_link(vault_root: &Path, config: &Config, opts: &LinkOpts) -> Result<Report> {
     tracing::info!("starting link command");
-    let notes = scan_vault(vault_root, &config.vault)?;
+    let all_notes = scan_vault(vault_root, &config.vault)?;
+    let exclude_patterns = parse_exclude_patterns(&config.vault.exclude);
+    let notes: Vec<Note> = all_notes
+        .iter()
+        .filter(|n| !is_excluded(n, &exclude_patterns))
+        .cloned()
+        .collect();
 
     if opts.apply {
         let count = linking::apply_linking(vault_root, &notes, &config.actions.linking)?;
