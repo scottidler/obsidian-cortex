@@ -9,6 +9,28 @@ use tracing::instrument;
 use crate::cli::DaemonOpts;
 use crate::config::{Config, DaemonConfig};
 
+/// Fingerprint of a single sweep's apply results.
+/// Used to detect oscillation between consecutive sweeps.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct SweepFingerprint {
+    /// Sorted list of (action, sorted file paths) for actions that applied changes.
+    results: Vec<(String, Vec<String>)>,
+}
+
+impl SweepFingerprint {
+    fn is_empty(&self) -> bool {
+        self.results.is_empty() || self.results.iter().all(|(_, files)| files.is_empty())
+    }
+
+    fn add(&mut self, action: &str, mut files: Vec<String>) {
+        files.sort();
+        files.dedup();
+        if !files.is_empty() {
+            self.results.push((action.to_string(), files));
+        }
+    }
+}
+
 /// Run the daemon based on subcommand options.
 #[instrument(skip(config, opts), fields(vault_root = %vault_root.display()))]
 pub fn run_daemon(vault_root: &Path, config: &Config, opts: &DaemonOpts) -> Result<()> {
@@ -74,13 +96,15 @@ fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     // Run a full sweep on startup
     tracing::info!("running initial full sweep");
     applying.store(true, Ordering::Relaxed);
-    run_configured_actions(vault_root, config, daemon_config, &[]);
+    let mut last_fingerprint = run_configured_actions(vault_root, config, daemon_config, &[]);
     applying.store(false, Ordering::Relaxed);
 
     loop {
         match rx.recv_timeout(Duration::from_secs(1)) {
             Ok(event) => {
                 if should_process_event(&event, &config.vault.ignore) {
+                    // Real user edit - reset cycle detection
+                    last_fingerprint = SweepFingerprint::default();
                     for path in event.paths {
                         if path.extension().and_then(|e| e.to_str()) == Some("md") {
                             let relative = path.strip_prefix(vault_root).unwrap_or(&path).to_path_buf();
@@ -109,8 +133,9 @@ fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
             }
 
             applying.store(true, Ordering::Relaxed);
-            run_configured_actions(vault_root, config, daemon_config, &pending_changes);
+            let fingerprint = run_configured_actions(vault_root, config, daemon_config, &pending_changes);
             applying.store(false, Ordering::Relaxed);
+            last_fingerprint = fingerprint;
             pending_changes.clear();
             last_run = Instant::now();
             last_sweep = Instant::now(); // Reset sweep timer after any run
@@ -119,9 +144,19 @@ fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
         // Periodic full sweep
         if pending_changes.is_empty() && last_sweep.elapsed() >= poll_interval {
             tracing::info!("running periodic sweep");
+
+            // Cycle detection: check if last sweep produced the same results
             applying.store(true, Ordering::Relaxed);
-            run_configured_actions(vault_root, config, daemon_config, &[]);
+            let fingerprint = run_configured_actions(vault_root, config, daemon_config, &[]);
             applying.store(false, Ordering::Relaxed);
+
+            if !fingerprint.is_empty() && fingerprint == last_fingerprint {
+                tracing::warn!(
+                    actions = ?fingerprint.results.iter().map(|(a, f)| format!("{a}: {} files", f.len())).collect::<Vec<_>>(),
+                    "cycle detected: sweep produced same results as previous, backing off"
+                );
+            }
+            last_fingerprint = fingerprint;
             last_sweep = Instant::now();
             last_run = Instant::now();
         }
@@ -150,10 +185,16 @@ fn should_process_event(event: &notify::Event, ignore_dirs: &[String]) -> bool {
     true
 }
 
-/// Run the configured on-change actions.
-fn run_configured_actions(vault_root: &Path, config: &Config, daemon_config: &DaemonConfig, changed_files: &[PathBuf]) {
+/// Run the configured on-change actions, returning a fingerprint of what was applied.
+fn run_configured_actions(
+    vault_root: &Path,
+    config: &Config,
+    daemon_config: &DaemonConfig,
+    changed_files: &[PathBuf],
+) -> SweepFingerprint {
     let action_names: Vec<&str> = daemon_config.enabled_actions();
     tracing::info!(actions = ?action_names, "running configured actions");
+    let mut fingerprint = SweepFingerprint::default();
 
     for action in &action_names {
         match *action {
@@ -169,6 +210,12 @@ fn run_configured_actions(vault_root: &Path, config: &Config, daemon_config: &Da
                     Ok(report) => {
                         let count = report.violations.len();
                         if auto && count > 0 {
+                            let files: Vec<String> = report
+                                .violations
+                                .iter()
+                                .map(|v| v.path.to_string_lossy().to_string())
+                                .collect();
+                            fingerprint.add("lint", files);
                             tracing::info!(fixes = count, "auto-applied lint");
                             println!("[daemon] auto-applied lint: {count} fix(es)");
                         } else if !report.is_empty() {
@@ -201,6 +248,12 @@ fn run_configured_actions(vault_root: &Path, config: &Config, daemon_config: &Da
                     Ok(report) => {
                         let count = report.violations.len();
                         if auto && count > 0 {
+                            let files: Vec<String> = report
+                                .violations
+                                .iter()
+                                .map(|v| v.path.to_string_lossy().to_string())
+                                .collect();
+                            fingerprint.add("link", files);
                             tracing::info!(fixes = count, "auto-applied link");
                             println!("[daemon] auto-applied link: {count} fix(es)");
                         } else if !report.is_empty() {
@@ -236,6 +289,7 @@ fn run_configured_actions(vault_root: &Path, config: &Config, daemon_config: &Da
     }
 
     tracing::info!(changed_count = changed_files.len(), "daemon action cycle complete");
+    fingerprint
 }
 
 /// Install a systemd user service for the daemon.
@@ -371,6 +425,49 @@ mod tests {
         assert!(!config.should_apply("link"));
         assert!(!config.should_apply("nonexistent"));
         assert_eq!(config.actions.len(), 3);
+    }
+
+    #[test]
+    fn test_sweep_fingerprint_empty_default() {
+        let fp = SweepFingerprint::default();
+        assert!(fp.is_empty());
+    }
+
+    #[test]
+    fn test_sweep_fingerprint_non_empty() {
+        let mut fp = SweepFingerprint::default();
+        fp.add("lint", vec!["a.md".to_string(), "b.md".to_string()]);
+        assert!(!fp.is_empty());
+    }
+
+    #[test]
+    fn test_sweep_fingerprint_equality() {
+        let mut fp1 = SweepFingerprint::default();
+        fp1.add("lint", vec!["b.md".to_string(), "a.md".to_string()]);
+
+        let mut fp2 = SweepFingerprint::default();
+        fp2.add("lint", vec!["a.md".to_string(), "b.md".to_string()]);
+
+        // Both should sort to the same order
+        assert_eq!(fp1, fp2);
+    }
+
+    #[test]
+    fn test_sweep_fingerprint_different_files() {
+        let mut fp1 = SweepFingerprint::default();
+        fp1.add("lint", vec!["a.md".to_string()]);
+
+        let mut fp2 = SweepFingerprint::default();
+        fp2.add("lint", vec!["b.md".to_string()]);
+
+        assert_ne!(fp1, fp2);
+    }
+
+    #[test]
+    fn test_sweep_fingerprint_empty_files_ignored() {
+        let mut fp = SweepFingerprint::default();
+        fp.add("lint", vec![]);
+        assert!(fp.is_empty());
     }
 
     #[test]
