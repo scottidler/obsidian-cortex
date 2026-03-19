@@ -28,9 +28,9 @@ use report::Report;
 use state::VaultManifest;
 use vault::{Note, scan_vault};
 
-/// Check if a note's path matches any of the exclude glob patterns.
-fn is_excluded(note: &Note, exclude_patterns: &[glob::Pattern]) -> bool {
-    exclude_patterns.iter().any(|pat| {
+/// Check if a note's path matches any glob pattern in the list.
+fn matches_any(note: &Note, patterns: &[glob::Pattern]) -> bool {
+    patterns.iter().any(|pat| {
         let path_str = note.path.to_string_lossy();
         pat.matches(&path_str)
             || note
@@ -41,14 +41,28 @@ fn is_excluded(note: &Note, exclude_patterns: &[glob::Pattern]) -> bool {
     })
 }
 
-/// Parse exclude pattern strings into glob::Pattern objects.
-fn parse_exclude_patterns(patterns: &[String]) -> Vec<glob::Pattern> {
+/// Check if a note is excluded from enforcement.
+/// A note is excluded if it matches an exclude pattern AND does not match any include pattern.
+/// Include overrides exclude.
+fn is_excluded(note: &Note, exclude_patterns: &[glob::Pattern], include_patterns: &[glob::Pattern]) -> bool {
+    if !matches_any(note, exclude_patterns) {
+        return false;
+    }
+    // Excluded, but check if include overrides
+    if !include_patterns.is_empty() && matches_any(note, include_patterns) {
+        return false;
+    }
+    true
+}
+
+/// Parse glob pattern strings into glob::Pattern objects.
+fn parse_patterns(patterns: &[String]) -> Vec<glob::Pattern> {
     patterns
         .iter()
         .filter_map(|p| match glob::Pattern::new(p) {
             Ok(pat) => Some(pat),
             Err(e) => {
-                tracing::warn!(pattern = %p, error = %e, "invalid exclude glob pattern, skipping");
+                tracing::warn!(pattern = %p, error = %e, "invalid glob pattern, skipping");
                 None
             }
         })
@@ -69,10 +83,11 @@ pub fn run_lint(vault_root: &Path, config: &Config, opts: &LintOpts) -> Result<R
     };
 
     // Split into all_notes (for link indexes) and lintable_notes (for violations)
-    let exclude_patterns = parse_exclude_patterns(&config.vault.exclude);
+    let exclude_patterns = parse_patterns(&config.vault.exclude);
+    let include_patterns = parse_patterns(&config.vault.include);
     let lintable_notes: Vec<Note> = all_notes
         .iter()
-        .filter(|n| !is_excluded(n, &exclude_patterns))
+        .filter(|n| !is_excluded(n, &exclude_patterns, &include_patterns))
         .cloned()
         .collect();
 
@@ -245,10 +260,11 @@ pub fn run_migrate(vault_root: &Path, config: &Config, opts: &MigrateOpts) -> Re
 pub fn run_link(vault_root: &Path, config: &Config, opts: &LinkOpts) -> Result<Report> {
     tracing::info!("starting link command");
     let all_notes = scan_vault(vault_root, &config.vault)?;
-    let exclude_patterns = parse_exclude_patterns(&config.vault.exclude);
+    let exclude_patterns = parse_patterns(&config.vault.exclude);
+    let include_patterns = parse_patterns(&config.vault.include);
     let notes: Vec<Note> = all_notes
         .iter()
-        .filter(|n| !is_excluded(n, &exclude_patterns))
+        .filter(|n| !is_excluded(n, &exclude_patterns, &include_patterns))
         .cloned()
         .collect();
 
@@ -268,4 +284,51 @@ pub fn run_intel(vault_root: &Path, config: &Config, opts: &IntelOpts) -> Result
     tracing::info!("starting intel command");
     let notes = scan_vault(vault_root, &config.vault)?;
     intel::run_intel(vault_root, &notes, &config.actions.intel, opts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::NoteBuilder;
+
+    fn note(path: &str) -> Note {
+        NoteBuilder::new(path).title(path).build()
+    }
+
+    #[test]
+    fn test_not_excluded_by_default() {
+        let n = note("notes/foo.md");
+        assert!(!is_excluded(&n, &[], &[]));
+    }
+
+    #[test]
+    fn test_excluded_by_pattern() {
+        let n = note("system/templates/link.md");
+        let exclude = parse_patterns(&["system/templates/**".to_string()]);
+        assert!(is_excluded(&n, &exclude, &[]));
+    }
+
+    #[test]
+    fn test_include_overrides_exclude() {
+        let n = note("system/design-vault.md");
+        let exclude = parse_patterns(&["system/**".to_string()]);
+        let include = parse_patterns(&["system/design-*.md".to_string()]);
+        assert!(!is_excluded(&n, &exclude, &include));
+    }
+
+    #[test]
+    fn test_include_does_not_affect_non_excluded() {
+        let n = note("notes/foo.md");
+        let exclude = parse_patterns(&["system/**".to_string()]);
+        let include = parse_patterns(&["system/design-*.md".to_string()]);
+        assert!(!is_excluded(&n, &exclude, &include));
+    }
+
+    #[test]
+    fn test_excluded_not_rescued_by_unmatched_include() {
+        let n = note("system/templates/link.md");
+        let exclude = parse_patterns(&["system/**".to_string()]);
+        let include = parse_patterns(&["system/design-*.md".to_string()]);
+        assert!(is_excluded(&n, &exclude, &include));
+    }
 }

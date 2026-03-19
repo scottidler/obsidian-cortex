@@ -309,15 +309,6 @@ pub fn scan_vault(vault_root: &Path, vault_config: &VaultConfig) -> Result<Vec<N
             continue;
         }
 
-        let relative = path.strip_prefix(vault_root).unwrap_or(path);
-
-        // Skip protected files
-        let relative_str = relative.to_string_lossy();
-        if vault_config.protected.iter().any(|p| relative_str == *p) {
-            tracing::debug!(path = %relative_str, "skipping protected file");
-            continue;
-        }
-
         match parse_note(vault_root, path) {
             Ok(note) => notes.push(note),
             Err(e) => {
@@ -393,18 +384,18 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_vault_skips_protected() {
+    fn test_scan_vault_includes_system_files() {
         let v = TestVault::new();
         let notes = v.scan();
-        // system/borg-ledger.md should NOT appear
-        assert!(!notes.iter().any(|n| n.path.to_string_lossy().contains("borg-ledger")));
+        // system/ files are now scanned (exclude/include is enforcement-level, not scan-level)
+        assert!(notes.iter().any(|n| n.path.to_string_lossy().contains("borg-ledger")));
     }
 
     #[test]
-    fn test_scan_vault_finds_all_non_excluded() {
+    fn test_scan_vault_finds_all_non_ignored() {
         let v = TestVault::new();
         let notes = v.scan();
-        // Should find all .md files except .obsidian/* and protected
+        // Should find all .md files except .obsidian/* (ignored dirs)
         assert!(notes.iter().any(|n| n.path == Path::new("rust-guide.md")));
         assert!(notes.iter().any(|n| n.path == Path::new("bare-note.md")));
         assert!(notes.iter().any(|n| n.path == Path::new("projects/obsidian-cortex.md")));

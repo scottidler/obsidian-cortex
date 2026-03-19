@@ -49,8 +49,8 @@ pub struct VaultConfig {
     #[serde(rename = "root-path")]
     pub root_path: Option<String>,
     pub ignore: Vec<String>,
-    pub protected: Vec<String>,
     pub exclude: Vec<String>,
+    pub include: Vec<String>,
 }
 
 impl Default for VaultConfig {
@@ -64,8 +64,8 @@ impl Default for VaultConfig {
                 "assets".to_string(),
                 "attachments".to_string(),
             ],
-            protected: Vec::new(),
             exclude: Vec::new(),
+            include: Vec::new(),
         }
     }
 }

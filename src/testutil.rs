@@ -192,8 +192,8 @@ impl TestVault {
         VaultConfig {
             root_path: None,
             ignore: vec![".git".to_string(), ".obsidian".to_string()],
-            protected: vec!["system/borg-ledger.md".to_string()],
-            exclude: Vec::new(),
+            exclude: vec!["system/**".to_string()],
+            include: Vec::new(),
         }
     }
 
