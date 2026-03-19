@@ -279,18 +279,16 @@ fn run_configured_actions(
                 };
                 match crate::run_lint(vault_root, config, &opts) {
                     Ok(report) => {
-                        let count = report.violations.len();
-                        if auto && count > 0 {
-                            let files: Vec<String> = report
-                                .violations
-                                .iter()
-                                .map(|v| v.path.to_string_lossy().to_string())
-                                .collect();
-                            fingerprint.add("lint", files);
-                            tracing::info!(fixes = count, "auto-applied lint");
-                            println!("[daemon] auto-applied lint: {count} fix(es)");
+                        if auto {
+                            // In apply mode, the report only contains residual unfixable violations.
+                            // The actual fixes were applied by apply_* functions (not tracked in report).
+                            // Only report remaining violations, don't fingerprint them.
+                            let remaining = report.violations.len();
+                            if remaining > 0 {
+                                tracing::debug!(remaining, "lint: unfixable violations remain after apply");
+                            }
                         } else if !report.is_empty() {
-                            println!("[daemon] lint: {count} violation(s)");
+                            println!("[daemon] lint: {} violation(s)", report.violations.len());
                         }
                     }
                     Err(e) => tracing::error!(error = %e, "lint action failed"),
@@ -341,13 +339,6 @@ fn run_configured_actions(
                         if auto {
                             match crate::duplicates::apply_duplicates(vault_root, &notes, &config.actions.duplicates) {
                                 Ok(count) if count > 0 => {
-                                    let report = crate::duplicates::lint_duplicates(&notes, &config.actions.duplicates);
-                                    let files: Vec<String> = report
-                                        .violations
-                                        .iter()
-                                        .map(|v| v.path.to_string_lossy().to_string())
-                                        .collect();
-                                    fingerprint.add("duplicates", files);
                                     tracing::info!(fixes = count, "auto-applied duplicates");
                                     println!("[daemon] auto-applied duplicates: {count} fix(es)");
                                 }
@@ -371,13 +362,6 @@ fn run_configured_actions(
                         if auto {
                             match crate::autotag::apply_autotag(vault_root, &notes, &notes, &config.actions.auto_tag) {
                                 Ok(count) if count > 0 => {
-                                    let report = crate::autotag::lint_autotag(&notes, &notes, &config.actions.auto_tag);
-                                    let files: Vec<String> = report
-                                        .violations
-                                        .iter()
-                                        .map(|v| v.path.to_string_lossy().to_string())
-                                        .collect();
-                                    fingerprint.add("auto-tag", files);
                                     tracing::info!(fixes = count, "auto-applied auto-tag");
                                     println!("[daemon] auto-applied auto-tag: {count} fix(es)");
                                 }
@@ -401,13 +385,6 @@ fn run_configured_actions(
                         if auto {
                             match crate::quality::apply_quality(vault_root, &notes, &config.actions.quality) {
                                 Ok(count) if count > 0 => {
-                                    let report = crate::quality::lint_quality(&notes, &config.actions.quality);
-                                    let files: Vec<String> = report
-                                        .violations
-                                        .iter()
-                                        .map(|v| v.path.to_string_lossy().to_string())
-                                        .collect();
-                                    fingerprint.add("quality", files);
                                     tracing::info!(fixes = count, "auto-applied quality");
                                     println!("[daemon] auto-applied quality: {count} fix(es)");
                                 }
