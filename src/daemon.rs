@@ -139,7 +139,6 @@ fn run_configured_actions(vault_root: &Path, config: &Config, daemon_config: &Da
             "lint" => {
                 let auto = daemon_config.should_apply("lint");
                 let opts = crate::cli::LintOpts {
-                    dry_run: !auto,
                     apply: auto,
                     format: "human".to_string(),
                     rule: Vec::new(),
@@ -174,7 +173,6 @@ fn run_configured_actions(vault_root: &Path, config: &Config, daemon_config: &Da
             "link" => {
                 let auto = daemon_config.should_apply("link");
                 let opts = crate::cli::LinkOpts {
-                    dry_run: !auto,
                     apply: auto,
                     scan: "all".to_string(),
                 };

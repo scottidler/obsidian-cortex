@@ -78,12 +78,8 @@ pub enum Command {
 
 #[derive(Parser)]
 pub struct LintOpts {
-    /// Report violations without fixing (default)
-    #[arg(long, default_value_t = true)]
-    pub dry_run: bool,
-
-    /// Auto-fix what's fixable
-    #[arg(long, conflicts_with = "dry_run")]
+    /// Auto-fix what's fixable (default: report only)
+    #[arg(long)]
     pub apply: bool,
 
     /// Output format: human (default), json
@@ -101,12 +97,8 @@ pub struct LintOpts {
 
 #[derive(Parser)]
 pub struct LinkOpts {
-    /// Report suggested links without applying (default)
-    #[arg(long, default_value_t = true)]
-    pub dry_run: bool,
-
-    /// Insert wikilinks into notes
-    #[arg(long, conflicts_with = "dry_run")]
+    /// Insert wikilinks into notes (default: report only)
+    #[arg(long)]
     pub apply: bool,
 
     /// What to scan for: people, projects, concepts, all (default)
@@ -165,12 +157,8 @@ pub struct DaemonOpts {
 
 #[derive(Parser)]
 pub struct MigrateOpts {
-    /// Preview changes (default)
-    #[arg(long, default_value_t = true)]
-    pub dry_run: bool,
-
-    /// Apply migrations
-    #[arg(long, conflicts_with = "dry_run")]
+    /// Apply migrations (default: report only)
+    #[arg(long)]
     pub apply: bool,
 
     /// Path to migration plan YAML
