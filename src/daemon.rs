@@ -32,13 +32,14 @@ fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     let daemon_config = &config.daemon;
     let debounce = Duration::from_secs(daemon_config.debounce_secs);
 
-    let any_auto_apply = !daemon_config.auto_apply.is_empty() && daemon_config.auto_apply.values().any(|&v| v);
+    let action_names: Vec<&str> = daemon_config.enabled_actions();
+    let any_auto_apply = daemon_config.actions.values().any(|a| a.apply);
 
     println!("Starting daemon, watching: {}", vault_root.display());
     println!(
         "Debounce: {}s, actions: {}{}",
         daemon_config.debounce_secs,
-        daemon_config.on_change.join(", "),
+        action_names.join(", "),
         if any_auto_apply { " (auto-apply enabled)" } else { "" },
     );
 
@@ -132,10 +133,11 @@ fn should_process_event(event: &notify::Event, ignore_dirs: &[String]) -> bool {
 
 /// Run the configured on-change actions.
 fn run_configured_actions(vault_root: &Path, config: &Config, daemon_config: &DaemonConfig, changed_files: &[PathBuf]) {
-    tracing::info!(actions = ?daemon_config.on_change, "running configured actions");
+    let action_names: Vec<&str> = daemon_config.enabled_actions();
+    tracing::info!(actions = ?action_names, "running configured actions");
 
-    for action in &daemon_config.on_change {
-        match action.as_str() {
+    for action in &action_names {
+        match *action {
             "lint" => {
                 let auto = daemon_config.should_apply("lint");
                 let opts = crate::cli::LintOpts {
@@ -305,7 +307,6 @@ fn show_status() -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::DaemonConfig;
-    use std::collections::HashMap;
 
     #[test]
     fn test_should_apply_default_is_false() {
@@ -317,39 +318,40 @@ mod tests {
 
     #[test]
     fn test_should_apply_explicit_true() {
-        let config = DaemonConfig {
-            auto_apply: HashMap::from([("lint".to_string(), true)]),
-            ..Default::default()
-        };
+        let mut config = DaemonConfig::default();
+        config
+            .actions
+            .insert("lint".to_string(), crate::config::DaemonAction { apply: true });
         assert!(config.should_apply("lint"));
         assert!(!config.should_apply("link"));
     }
 
     #[test]
     fn test_should_apply_explicit_false() {
-        let config = DaemonConfig {
-            auto_apply: HashMap::from([("lint".to_string(), false)]),
-            ..Default::default()
-        };
+        let config = DaemonConfig::default();
+        // lint is in default actions but apply defaults to false
         assert!(!config.should_apply("lint"));
     }
 
     #[test]
-    fn test_daemon_config_deserialize_without_auto_apply() {
-        let yaml = "on-change: [lint]\ndebounce-secs: 10\n";
+    fn test_enabled_actions() {
+        let config = DaemonConfig::default();
+        let actions = config.enabled_actions();
+        assert!(actions.contains(&"lint"));
+        assert!(actions.contains(&"broken-links"));
+    }
+
+    #[test]
+    fn test_daemon_config_deserialize_actions() {
+        let yaml =
+            "actions:\n  lint:\n    apply: true\n  broken-links: {}\n  link:\n    apply: false\ndebounce-secs: 10\n";
         let config: DaemonConfig = serde_yaml::from_str(yaml).expect("deserialize");
-        assert_eq!(config.on_change, vec!["lint"]);
         assert_eq!(config.debounce_secs, 10);
-        assert!(config.auto_apply.is_empty());
-        assert!(!config.should_apply("lint"));
-    }
-
-    #[test]
-    fn test_daemon_config_deserialize_with_auto_apply() {
-        let yaml = "on-change: [lint, link]\nauto-apply:\n  lint: true\n  link: false\n";
-        let config: DaemonConfig = serde_yaml::from_str(yaml).expect("deserialize");
         assert!(config.should_apply("lint"));
+        assert!(!config.should_apply("broken-links"));
         assert!(!config.should_apply("link"));
+        assert!(!config.should_apply("nonexistent"));
+        assert_eq!(config.actions.len(), 3);
     }
 
     #[test]

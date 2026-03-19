@@ -48,27 +48,31 @@ Add an `auto-apply` map to the `daemon` config section. Each key is an action na
 ```yaml
 daemon:
   debounce-secs: 5
-  on-change: [lint, broken-links]   # default actions
-  auto-apply:
-    lint: false        # naming, frontmatter, tags, scope
-    link: false        # insert wikilinks
-    # broken-links: N/A (read-only, no apply mode)
-    # state: N/A (always writes manifest)
-    # intel: N/A (always writes digest)
+  actions:
+    lint:
+      apply: false       # naming, frontmatter, tags, scope
+    broken-links: {}     # read-only, no apply mode
+    link:
+      apply: false       # insert wikilinks
+    state: {}            # always writes manifest
 ```
 
-To enable linking and auto-apply for lint:
+To enable auto-apply for lint and link:
 ```yaml
 daemon:
-  on-change: [lint, broken-links, link, state]
-  auto-apply:
-    lint: true
+  actions:
+    lint:
+      apply: true
+    broken-links: {}
+    link:
+      apply: true
+    state: {}
 ```
 
 **Semantics:**
-- `auto-apply` only affects actions already listed in `on-change`. Adding `auto-apply.link: true` without `link` in `on-change` does nothing.
-- Actions without an `auto-apply` entry default to `false` (report-only).
-- Actions that have no apply mode (broken-links, state, intel) ignore the setting - they behave the same regardless.
+- An action is enabled by being present in the `actions` map.
+- `apply` defaults to `false` (report-only) when omitted or `{}`.
+- Actions that have no apply mode (broken-links, state, intel) ignore the `apply` setting.
 
 ### Data Model
 

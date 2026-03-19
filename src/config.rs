@@ -292,33 +292,42 @@ impl Default for StateConfig {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct DaemonConfig {
-    #[serde(rename = "on-change")]
-    pub on_change: Vec<String>,
+    pub actions: HashMap<String, DaemonAction>,
     #[serde(rename = "debounce-secs")]
     pub debounce_secs: u64,
     pub watch: String,
     #[serde(rename = "poll-interval")]
     pub poll_interval: u64,
-    #[serde(rename = "auto-apply", default)]
-    pub auto_apply: HashMap<String, bool>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct DaemonAction {
+    pub apply: bool,
 }
 
 impl DaemonConfig {
+    /// Get the list of enabled action names.
+    pub fn enabled_actions(&self) -> Vec<&str> {
+        self.actions.keys().map(|s| s.as_str()).collect()
+    }
+
     /// Check whether a given action should auto-apply.
-    /// Returns false if the action is not in the map or is explicitly set to false.
     pub fn should_apply(&self, action: &str) -> bool {
-        self.auto_apply.get(action).copied().unwrap_or(false)
+        self.actions.get(action).is_some_and(|a| a.apply)
     }
 }
 
 impl Default for DaemonConfig {
     fn default() -> Self {
+        let mut actions = HashMap::new();
+        actions.insert("lint".to_string(), DaemonAction { apply: false });
+        actions.insert("broken-links".to_string(), DaemonAction { apply: false });
         Self {
-            on_change: vec!["lint".to_string(), "broken-links".to_string()],
+            actions,
             debounce_secs: 5,
             watch: "notify".to_string(),
             poll_interval: 300,
-            auto_apply: HashMap::new(),
         }
     }
 }
