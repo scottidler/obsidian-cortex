@@ -259,10 +259,7 @@ fn find_mention(body: &str, title: &str, stem: &str, min_len: usize) -> Option<S
 fn insert_first_wikilink(content: &str, target: &str) -> Option<String> {
     // Find the end of frontmatter so we only search the body
     let body_start = if let Some(after_open) = content.strip_prefix("---") {
-        after_open
-            .find("\n---")
-            .map(|pos| 3 + pos + "\n---".len())
-            .unwrap_or(0)
+        after_open.find("\n---").map(|pos| 3 + pos + "\n---".len()).unwrap_or(0)
     } else {
         0
     };
