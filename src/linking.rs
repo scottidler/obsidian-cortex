@@ -73,8 +73,9 @@ pub fn lint_linking(notes: &[Note], config: &LinkingConfig) -> Report {
                 return None;
             }
             let stem = n.path.file_stem()?.to_str()?.to_string();
-            let title = n.frontmatter.title.clone().unwrap_or_else(|| stem.clone());
-            // Skip notes with empty titles (e.g. template stubs)
+            let raw_title = n.frontmatter.title.clone().unwrap_or_else(|| stem.clone());
+            // Strip wikilink brackets from titles (some notes have title: "[[foo]]")
+            let title = raw_title.trim_start_matches("[[").trim_end_matches("]]").to_string();
             if title.is_empty() {
                 return None;
             }
@@ -220,6 +221,19 @@ fn find_mention(body: &str, title: &str, stem: &str, min_len: usize) -> Option<S
         }
 
         if let Some(pos) = body_lower.find(&term_lower) {
+            // Skip if match is inside an existing wikilink
+            let before_slice = &body[..pos];
+            if let (Some(open), Some(close)) = (before_slice.rfind("[["), before_slice.rfind("]]"))
+                && open > close
+            {
+                tracing::debug!(term = %term, "skipping mention inside existing wikilink");
+                continue;
+            }
+            if before_slice.ends_with("[[") {
+                tracing::debug!(term = %term, "skipping mention inside existing wikilink");
+                continue;
+            }
+
             // Verify it's a word boundary (not inside another word)
             let before_char = body[..pos].chars().last().unwrap_or(' ');
             let after_pos = pos + term_lower.len();
