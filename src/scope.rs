@@ -135,6 +135,39 @@ pub fn insert_frontmatter_fields(content: &str, fields: &[(String, serde_yaml::V
     Some(format!("{prefix}---\n{new_fm}{rest}"))
 }
 
+/// Remove frontmatter fields by key name.
+/// Returns None if no frontmatter found or no changes needed.
+pub fn remove_frontmatter_fields(content: &str, keys: &[String]) -> Option<String> {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        return None;
+    }
+
+    let after_opening = &trimmed[3..];
+    let after_opening = after_opening.trim_start_matches(['\r', '\n']);
+    let end_pos = after_opening.find("\n---")?;
+
+    let fm_block = &after_opening[..end_pos];
+    let rest = &after_opening[end_pos..];
+
+    let original_lines: Vec<&str> = fm_block.lines().collect();
+    let new_lines: Vec<&str> = original_lines
+        .iter()
+        .filter(|line| !keys.iter().any(|key| line.starts_with(&format!("{key}:"))))
+        .copied()
+        .collect();
+
+    if new_lines.len() == original_lines.len() {
+        return None; // No fields were removed
+    }
+
+    let offset = content.len() - trimmed.len();
+    let prefix = &content[..offset];
+    let new_fm = new_lines.join("\n");
+
+    Some(format!("{prefix}---\n{new_fm}{rest}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,5 +248,28 @@ mod tests {
         // daily-standup.md should now have scope: work
         let content = v.read("daily-standup.md");
         assert!(content.contains("scope: work"));
+    }
+
+    #[test]
+    fn test_remove_frontmatter_fields() {
+        let content =
+            "---\ntitle: Test\ndate: 2026-01-01\ncortex-duplicate: true\ncortex-duplicate-group: dup-abc\n---\nBody\n";
+        let keys = vec!["cortex-duplicate".to_string(), "cortex-duplicate-group".to_string()];
+
+        let result = remove_frontmatter_fields(content, &keys);
+        assert!(result.is_some());
+        let result = result.expect("should have result");
+        assert!(!result.contains("cortex-duplicate"));
+        assert!(result.contains("title: Test"));
+        assert!(result.contains("Body"));
+    }
+
+    #[test]
+    fn test_remove_frontmatter_fields_no_match() {
+        let content = "---\ntitle: Test\ndate: 2026-01-01\n---\nBody\n";
+        let keys = vec!["cortex-duplicate".to_string()];
+
+        let result = remove_frontmatter_fields(content, &keys);
+        assert!(result.is_none(), "should return None when no fields removed");
     }
 }

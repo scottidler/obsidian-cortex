@@ -263,6 +263,36 @@ fn run_configured_actions(
                     Err(e) => tracing::error!(error = %e, "link action failed"),
                 }
             }
+            "duplicates" => {
+                let auto = daemon_config.should_apply("duplicates");
+                match crate::vault::scan_vault(vault_root, &config.vault) {
+                    Ok(notes) => {
+                        if auto {
+                            match crate::duplicates::apply_duplicates(vault_root, &notes, &config.actions.duplicates) {
+                                Ok(count) if count > 0 => {
+                                    let report = crate::duplicates::lint_duplicates(&notes, &config.actions.duplicates);
+                                    let files: Vec<String> = report
+                                        .violations
+                                        .iter()
+                                        .map(|v| v.path.to_string_lossy().to_string())
+                                        .collect();
+                                    fingerprint.add("duplicates", files);
+                                    tracing::info!(fixes = count, "auto-applied duplicates");
+                                    println!("[daemon] auto-applied duplicates: {count} fix(es)");
+                                }
+                                Ok(_) => {}
+                                Err(e) => tracing::error!(error = %e, "duplicates apply failed"),
+                            }
+                        } else {
+                            let report = crate::duplicates::lint_duplicates(&notes, &config.actions.duplicates);
+                            if !report.is_empty() {
+                                println!("[daemon] duplicates: {} violation(s)", report.violations.len());
+                            }
+                        }
+                    }
+                    Err(e) => tracing::error!(error = %e, "failed to scan vault for duplicates"),
+                }
+            }
             "intel" => {
                 let opts = crate::cli::IntelOpts {
                     daily: true,

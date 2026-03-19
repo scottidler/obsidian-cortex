@@ -1,8 +1,9 @@
 use std::collections::HashMap;
+use std::path::Path;
 use tracing::instrument;
 
 use crate::config::DuplicatesConfig;
-use crate::report::{Report, Severity, Violation};
+use crate::report::{Fix, Report, Severity, Violation};
 use crate::vault::Note;
 
 /// Run duplicate detection on all notes.
@@ -13,6 +14,10 @@ pub fn lint_duplicates(notes: &[Note], config: &DuplicatesConfig) -> Report {
     // Phase 1: exact content hash duplicates
     let mut hash_groups: HashMap<u64, Vec<usize>> = HashMap::new();
     for (i, note) in notes.iter().enumerate() {
+        // Skip empty/whitespace-only bodies to avoid false exact duplicates
+        if note.body.trim().is_empty() {
+            continue;
+        }
         let hash = simple_hash(&note.body);
         hash_groups.entry(hash).or_default().push(i);
     }
@@ -33,6 +38,8 @@ pub fn lint_duplicates(notes: &[Note], config: &DuplicatesConfig) -> Report {
             }
         }
 
+        // Use content hash as group ID for exact duplicates
+        let group_hash = format!("dup-{:x}", simple_hash(&notes[indices[0]].body));
         let first = &notes[indices[0]];
         for &idx in &indices[1..] {
             let dupe = &notes[idx];
@@ -41,9 +48,27 @@ pub fn lint_duplicates(notes: &[Note], config: &DuplicatesConfig) -> Report {
                 rule: "duplicates.exact".to_string(),
                 severity: Severity::Warning,
                 message: format!("exact duplicate of {}", first.path.display()),
-                fix: None,
+                fix: Some(Fix::SetCortexFields {
+                    fields: vec![
+                        ("cortex-duplicate".to_string(), "true".to_string()),
+                        ("cortex-duplicate-group".to_string(), group_hash.clone()),
+                    ],
+                }),
             });
         }
+        // Also tag the first note in the group
+        report.add(Violation {
+            path: first.path.clone(),
+            rule: "duplicates.exact".to_string(),
+            severity: Severity::Warning,
+            message: format!("exact duplicate of {}", notes[indices[1]].path.display()),
+            fix: Some(Fix::SetCortexFields {
+                fields: vec![
+                    ("cortex-duplicate".to_string(), "true".to_string()),
+                    ("cortex-duplicate-group".to_string(), group_hash.clone()),
+                ],
+            }),
+        });
     }
 
     // Phase 2: fuzzy similarity (TF-IDF based)
@@ -59,18 +84,113 @@ pub fn lint_duplicates(notes: &[Note], config: &DuplicatesConfig) -> Report {
                 continue;
             }
 
+            // Use oldest note stem as group anchor for fuzzy matches
+            let stem_i = notes[i].path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+            let stem_j = notes[j].path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+            let group_anchor = if stem_i <= stem_j { stem_i } else { stem_j };
+            let group_hash = format!("dup-{group_anchor}");
+
             report.add(Violation {
                 path: notes[j].path.clone(),
                 rule: "duplicates.similar".to_string(),
                 severity: Severity::Info,
                 message: format!("similar to {} (score: {:.2})", notes[i].path.display(), score),
-                fix: None,
+                fix: Some(Fix::SetCortexFields {
+                    fields: vec![
+                        ("cortex-duplicate".to_string(), "true".to_string()),
+                        ("cortex-duplicate-group".to_string(), group_hash.clone()),
+                    ],
+                }),
             });
+
+            // Also tag the paired note
+            let already_tagged = report
+                .violations
+                .iter()
+                .any(|v| v.path == notes[i].path && v.rule.starts_with("duplicates."));
+            if !already_tagged {
+                report.add(Violation {
+                    path: notes[i].path.clone(),
+                    rule: "duplicates.similar".to_string(),
+                    severity: Severity::Info,
+                    message: format!("similar to {} (score: {:.2})", notes[j].path.display(), score),
+                    fix: Some(Fix::SetCortexFields {
+                        fields: vec![
+                            ("cortex-duplicate".to_string(), "true".to_string()),
+                            ("cortex-duplicate-group".to_string(), group_hash.clone()),
+                        ],
+                    }),
+                });
+            }
         }
     }
 
     tracing::info!(violation_count = report.violations.len(), "duplicates lint complete");
     report
+}
+
+/// Apply duplicate surfacing: write cortex-duplicate fields to frontmatter.
+/// Also clears stale duplicate fields from notes no longer flagged.
+#[instrument(skip(notes, config))]
+pub fn apply_duplicates(vault_root: &Path, notes: &[Note], config: &DuplicatesConfig) -> eyre::Result<usize> {
+    let report = lint_duplicates(notes, config);
+    let mut fixed_count = 0;
+
+    // Collect paths that ARE duplicates in this run
+    let duplicate_paths: std::collections::HashSet<&Path> =
+        report.violations.iter().map(|v| v.path.as_path()).collect();
+
+    // Apply: write cortex-duplicate fields to flagged notes
+    for violation in &report.violations {
+        if let Some(Fix::SetCortexFields { fields }) = &violation.fix {
+            let abs_path = vault_root.join(&violation.path);
+            let content = std::fs::read_to_string(&abs_path)?;
+
+            // Check if fields already set correctly
+            let already_set = fields
+                .iter()
+                .all(|(key, val)| content.contains(&format!("{key}: {val}")));
+            if already_set {
+                continue;
+            }
+
+            let yaml_fields: Vec<(String, serde_yaml::Value)> = fields
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_yaml::Value::String(v.clone())))
+                .collect();
+
+            if let Some(new_content) = crate::scope::insert_frontmatter_fields(&content, &yaml_fields) {
+                std::fs::write(&abs_path, new_content)?;
+                tracing::info!(path = %violation.path.display(), "wrote duplicate fields");
+                fixed_count += 1;
+            }
+        }
+    }
+
+    // Clear: remove cortex-duplicate fields from notes that are no longer duplicates
+    let cortex_keys = vec!["cortex-duplicate".to_string(), "cortex-duplicate-group".to_string()];
+    for note in notes {
+        if duplicate_paths.contains(note.path.as_path()) {
+            continue; // Still a duplicate, don't clear
+        }
+
+        // Check if this note has cortex-duplicate fields that need clearing
+        let has_cortex_fields = note.frontmatter.extra.contains_key("cortex-duplicate")
+            || note.frontmatter.extra.contains_key("cortex-duplicate-group");
+        if !has_cortex_fields {
+            continue;
+        }
+
+        let abs_path = vault_root.join(&note.path);
+        let content = std::fs::read_to_string(&abs_path)?;
+        if let Some(new_content) = crate::scope::remove_frontmatter_fields(&content, &cortex_keys) {
+            std::fs::write(&abs_path, new_content)?;
+            tracing::info!(path = %note.path.display(), "cleared stale duplicate fields");
+            fixed_count += 1;
+        }
+    }
+
+    Ok(fixed_count)
 }
 
 /// Simple non-cryptographic hash for body content comparison.
@@ -90,7 +210,15 @@ fn simple_hash(content: &str) -> u64 {
 
 /// Build a simple TF-IDF model and find similar note pairs.
 fn find_similar_notes(notes: &[Note], threshold: f64, same_type_only: bool) -> Vec<(usize, usize, f64)> {
-    let tokenized: Vec<HashMap<&str, usize>> = notes.iter().map(|n| tokenize(&n.body)).collect();
+    // Filter out empty bodies for TF-IDF
+    let valid_indices: Vec<usize> = notes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| !n.body.trim().is_empty())
+        .map(|(i, _)| i)
+        .collect();
+
+    let tokenized: Vec<HashMap<&str, usize>> = valid_indices.iter().map(|&i| tokenize(&notes[i].body)).collect();
 
     // Document frequency
     let mut df: HashMap<&str, usize> = HashMap::new();
@@ -100,7 +228,7 @@ fn find_similar_notes(notes: &[Note], threshold: f64, same_type_only: bool) -> V
         }
     }
 
-    let n = notes.len() as f64;
+    let n = valid_indices.len() as f64;
 
     // TF-IDF vectors (sparse)
     let tfidf_vecs: Vec<HashMap<&str, f64>> = tokenized
@@ -123,13 +251,15 @@ fn find_similar_notes(notes: &[Note], threshold: f64, same_type_only: bool) -> V
 
     let mut results = Vec::new();
 
-    for i in 0..notes.len() {
-        for j in (i + 1)..notes.len() {
+    for vi in 0..valid_indices.len() {
+        for vj in (vi + 1)..valid_indices.len() {
+            let i = valid_indices[vi];
+            let j = valid_indices[vj];
             if same_type_only && notes[i].frontmatter.note_type != notes[j].frontmatter.note_type {
                 continue;
             }
 
-            let score = cosine_similarity(&tfidf_vecs[i], &tfidf_vecs[j]);
+            let score = cosine_similarity(&tfidf_vecs[vi], &tfidf_vecs[vj]);
             if score >= threshold {
                 results.push((i, j, score));
             }
@@ -203,6 +333,128 @@ mod tests {
                 .violations
                 .iter()
                 .any(|vi| vi.rule == "duplicates.exact" && vi.path.to_string_lossy() == "rust-guide.md")
+        );
+    }
+
+    #[test]
+    fn test_empty_bodies_not_false_duplicates() {
+        use crate::testutil::NoteBuilder;
+
+        let notes = vec![
+            NoteBuilder::new("empty-a.md").title("Empty A").body("").build(),
+            NoteBuilder::new("empty-b.md").title("Empty B").body("   ").build(),
+            NoteBuilder::new("empty-c.md").title("Empty C").body("\n\n").build(),
+        ];
+        let config = DuplicatesConfig {
+            threshold: 0.85,
+            same_type_only: false,
+        };
+
+        let report = lint_duplicates(&notes, &config);
+        assert!(
+            report.violations.is_empty(),
+            "empty body notes should not be flagged as duplicates"
+        );
+    }
+
+    #[test]
+    fn test_exact_duplicates_have_fix_with_group() {
+        let v = TestVault::new();
+        let notes = v.scan();
+        let config = v.config().actions.duplicates;
+
+        let report = lint_duplicates(&notes, &config);
+        let dupe_violations: Vec<_> = report
+            .violations
+            .iter()
+            .filter(|vi| vi.rule == "duplicates.exact")
+            .collect();
+
+        assert!(!dupe_violations.is_empty());
+        for vi in &dupe_violations {
+            match &vi.fix {
+                Some(Fix::SetCortexFields { fields }) => {
+                    assert!(fields.iter().any(|(k, v)| k == "cortex-duplicate" && v == "true"));
+                    assert!(fields.iter().any(|(k, _)| k == "cortex-duplicate-group"));
+                }
+                other => panic!("expected SetCortexFields fix, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_both_notes_in_duplicate_pair_tagged() {
+        let v = TestVault::new();
+        let notes = v.scan();
+        let config = v.config().actions.duplicates;
+
+        let report = lint_duplicates(&notes, &config);
+        let dupe_paths: Vec<String> = report
+            .violations
+            .iter()
+            .filter(|vi| vi.rule == "duplicates.exact")
+            .map(|vi| vi.path.to_string_lossy().to_string())
+            .collect();
+
+        assert!(
+            dupe_paths.iter().any(|p| p.contains("duplicate-a")),
+            "duplicate-a should be tagged"
+        );
+        assert!(
+            dupe_paths.iter().any(|p| p.contains("duplicate-b")),
+            "duplicate-b should be tagged"
+        );
+    }
+
+    #[test]
+    fn test_apply_duplicates_writes_frontmatter() {
+        let v = TestVault::new();
+        let notes = v.scan();
+        let config = v.config().actions.duplicates;
+
+        let count = apply_duplicates(v.root(), &notes, &config).expect("apply");
+        assert!(count > 0, "should have applied duplicate fields");
+
+        let content_a = v.read("duplicate-a.md");
+        let content_b = v.read("duplicate-b.md");
+        assert!(
+            content_a.contains("cortex-duplicate:"),
+            "duplicate-a should have cortex-duplicate field"
+        );
+        assert!(
+            content_b.contains("cortex-duplicate:"),
+            "duplicate-b should have cortex-duplicate field"
+        );
+        assert!(
+            content_a.contains("cortex-duplicate-group:"),
+            "duplicate-a should have cortex-duplicate-group field"
+        );
+    }
+
+    #[test]
+    fn test_apply_duplicates_clears_stale_fields() {
+        let v = TestVault::new();
+
+        // Add a note with stale cortex-duplicate fields (not actually a duplicate)
+        v.add_note(
+            "formerly-duplicate.md",
+            "---\ntitle: Formerly Duplicate\ndate: 2026-03-18\ntype: note\ndomain: tech\norigin: authored\ntags: []\ncortex-duplicate: true\ncortex-duplicate-group: dup-old\n---\nThis note is unique now.\n",
+        );
+
+        let notes = v.scan();
+        let config = v.config().actions.duplicates;
+
+        let count = apply_duplicates(v.root(), &notes, &config).expect("apply");
+        assert!(count > 0);
+
+        let content = v.read("formerly-duplicate.md");
+        assert!(
+            !content.contains("cortex-duplicate:"),
+            "stale cortex-duplicate field should be removed"
+        );
+        assert!(
+            !content.contains("cortex-duplicate-group:"),
+            "stale cortex-duplicate-group field should be removed"
         );
     }
 

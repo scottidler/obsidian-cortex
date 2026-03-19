@@ -26,6 +26,8 @@ pub enum Fix {
     ReplaceTag { old: String, new: String },
     AddWikilink { target: String, context: String },
     MoveFile { from: PathBuf, to: PathBuf },
+    SetCortexFields { fields: Vec<(String, String)> },
+    RemoveCortexFields { keys: Vec<String> },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -97,6 +99,13 @@ impl Report {
                     Fix::AddWikilink { target, .. } => format!("add link [[{target}]]"),
                     Fix::MoveFile { from, to } => {
                         format!("move {} -> {}", from.display(), to.display())
+                    }
+                    Fix::SetCortexFields { fields } => {
+                        let pairs: Vec<String> = fields.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                        format!("set {}", pairs.join(", "))
+                    }
+                    Fix::RemoveCortexFields { keys } => {
+                        format!("remove {}", keys.join(", "))
                     }
                 };
                 println!("  {} {}", "fix:".dimmed(), fix_desc.dimmed());

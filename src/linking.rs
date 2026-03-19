@@ -258,10 +258,10 @@ fn find_mention(body: &str, title: &str, stem: &str, min_len: usize) -> Option<S
 /// Only searches the body (after frontmatter) to avoid corrupting YAML fields.
 fn insert_first_wikilink(content: &str, target: &str) -> Option<String> {
     // Find the end of frontmatter so we only search the body
-    let body_start = if content.starts_with("---") {
-        content[3..]
+    let body_start = if let Some(after_open) = content.strip_prefix("---") {
+        after_open
             .find("\n---")
-            .map(|pos| pos + 3 + "\n---".len())
+            .map(|pos| 3 + pos + "\n---".len())
             .unwrap_or(0)
     } else {
         0
