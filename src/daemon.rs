@@ -1,7 +1,8 @@
 use eyre::{Context, Result};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 use tracing::instrument;
 
@@ -31,17 +32,27 @@ fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     let daemon_config = &config.daemon;
     let debounce = Duration::from_secs(daemon_config.debounce_secs);
 
+    let any_auto_apply = !daemon_config.auto_apply.is_empty() && daemon_config.auto_apply.values().any(|&v| v);
+
     println!("Starting daemon, watching: {}", vault_root.display());
     println!(
-        "Debounce: {}s, actions: {}",
+        "Debounce: {}s, actions: {}{}",
         daemon_config.debounce_secs,
-        daemon_config.on_change.join(", ")
+        daemon_config.on_change.join(", "),
+        if any_auto_apply { " (auto-apply enabled)" } else { "" },
     );
+
+    // Flag to suppress events during auto-apply to prevent feedback loops.
+    let applying = Arc::new(AtomicBool::new(false));
+    let applying_clone = Arc::clone(&applying);
 
     let (tx, rx) = mpsc::channel();
 
     let mut watcher: RecommendedWatcher =
         notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+            if applying_clone.load(Ordering::Relaxed) {
+                return; // Discard events during auto-apply
+            }
             if let Ok(event) = res {
                 let _ = tx.send(event);
             }
@@ -88,7 +99,9 @@ fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                 println!("  changed: {}", path.display());
             }
 
+            applying.store(true, Ordering::Relaxed);
             run_configured_actions(vault_root, config, daemon_config, &pending_changes);
+            applying.store(false, Ordering::Relaxed);
             pending_changes.clear();
             last_run = Instant::now();
         }
@@ -124,17 +137,22 @@ fn run_configured_actions(vault_root: &Path, config: &Config, daemon_config: &Da
     for action in &daemon_config.on_change {
         match action.as_str() {
             "lint" => {
+                let auto = daemon_config.should_apply("lint");
                 let opts = crate::cli::LintOpts {
-                    dry_run: true,
-                    apply: false,
+                    dry_run: !auto,
+                    apply: auto,
                     format: "human".to_string(),
                     rule: Vec::new(),
                     path: None,
                 };
                 match crate::run_lint(vault_root, config, &opts) {
                     Ok(report) => {
-                        if !report.is_empty() {
-                            println!("[daemon] lint: {} violation(s)", report.violations.len());
+                        let count = report.violations.len();
+                        if auto && count > 0 {
+                            tracing::info!(fixes = count, "auto-applied lint");
+                            println!("[daemon] auto-applied lint: {count} fix(es)");
+                        } else if !report.is_empty() {
+                            println!("[daemon] lint: {count} violation(s)");
                         }
                     }
                     Err(e) => tracing::error!(error = %e, "lint action failed"),
@@ -154,15 +172,20 @@ fn run_configured_actions(vault_root: &Path, config: &Config, daemon_config: &Da
                 }
             }
             "link" => {
+                let auto = daemon_config.should_apply("link");
                 let opts = crate::cli::LinkOpts {
-                    dry_run: true,
-                    apply: false,
+                    dry_run: !auto,
+                    apply: auto,
                     scan: "all".to_string(),
                 };
                 match crate::run_link(vault_root, config, &opts) {
                     Ok(report) => {
-                        if !report.is_empty() {
-                            println!("[daemon] link: {} suggestion(s)", report.violations.len());
+                        let count = report.violations.len();
+                        if auto && count > 0 {
+                            tracing::info!(fixes = count, "auto-applied link");
+                            println!("[daemon] auto-applied link: {count} fix(es)");
+                        } else if !report.is_empty() {
+                            println!("[daemon] link: {count} suggestion(s)");
                         }
                     }
                     Err(e) => tracing::error!(error = %e, "link action failed"),
@@ -283,6 +306,53 @@ fn show_status() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DaemonConfig;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_should_apply_default_is_false() {
+        let config = DaemonConfig::default();
+        assert!(!config.should_apply("lint"));
+        assert!(!config.should_apply("link"));
+        assert!(!config.should_apply("nonexistent"));
+    }
+
+    #[test]
+    fn test_should_apply_explicit_true() {
+        let config = DaemonConfig {
+            auto_apply: HashMap::from([("lint".to_string(), true)]),
+            ..Default::default()
+        };
+        assert!(config.should_apply("lint"));
+        assert!(!config.should_apply("link"));
+    }
+
+    #[test]
+    fn test_should_apply_explicit_false() {
+        let config = DaemonConfig {
+            auto_apply: HashMap::from([("lint".to_string(), false)]),
+            ..Default::default()
+        };
+        assert!(!config.should_apply("lint"));
+    }
+
+    #[test]
+    fn test_daemon_config_deserialize_without_auto_apply() {
+        let yaml = "on-change: [lint]\ndebounce-secs: 10\n";
+        let config: DaemonConfig = serde_yaml::from_str(yaml).expect("deserialize");
+        assert_eq!(config.on_change, vec!["lint"]);
+        assert_eq!(config.debounce_secs, 10);
+        assert!(config.auto_apply.is_empty());
+        assert!(!config.should_apply("lint"));
+    }
+
+    #[test]
+    fn test_daemon_config_deserialize_with_auto_apply() {
+        let yaml = "on-change: [lint, link]\nauto-apply:\n  lint: true\n  link: false\n";
+        let config: DaemonConfig = serde_yaml::from_str(yaml).expect("deserialize");
+        assert!(config.should_apply("lint"));
+        assert!(!config.should_apply("link"));
+    }
 
     #[test]
     fn test_should_process_event_create() {

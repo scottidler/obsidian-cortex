@@ -280,6 +280,16 @@ pub struct DaemonConfig {
     pub watch: String,
     #[serde(rename = "poll-interval")]
     pub poll_interval: u64,
+    #[serde(rename = "auto-apply", default)]
+    pub auto_apply: HashMap<String, bool>,
+}
+
+impl DaemonConfig {
+    /// Check whether a given action should auto-apply.
+    /// Returns false if the action is not in the map or is explicitly set to false.
+    pub fn should_apply(&self, action: &str) -> bool {
+        self.auto_apply.get(action).copied().unwrap_or(false)
+    }
 }
 
 impl Default for DaemonConfig {
@@ -289,6 +299,7 @@ impl Default for DaemonConfig {
             debounce_secs: 5,
             watch: "notify".to_string(),
             poll_interval: 300,
+            auto_apply: HashMap::new(),
         }
     }
 }
