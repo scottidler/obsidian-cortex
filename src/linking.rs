@@ -4,9 +4,50 @@ use std::path::Path;
 use std::sync::LazyLock;
 use tracing::instrument;
 
-use crate::config::LinkingConfig;
+use crate::config::{LinkingConfig, LinkingFilter};
 use crate::report::{Fix, Report, Severity, Violation};
 use crate::vault::Note;
+
+/// Check if a value is excluded by a filter.
+/// Excluded if it matches an exclude pattern and no include pattern overrides it.
+fn is_filtered(value: &str, filter: &LinkingFilter) -> bool {
+    if filter.exclude.is_empty() {
+        return false;
+    }
+    let excluded = filter.exclude.iter().any(|e| e == value);
+    if !excluded {
+        return false;
+    }
+    if !filter.include.is_empty() && filter.include.iter().any(|i| i == value) {
+        return false;
+    }
+    true
+}
+
+/// Check if a path is excluded by a filter (glob-style prefix matching).
+fn is_path_filtered(path: &Path, filter: &LinkingFilter) -> bool {
+    if filter.exclude.is_empty() {
+        return false;
+    }
+    let path_str = path.to_string_lossy();
+    let excluded = filter
+        .exclude
+        .iter()
+        .any(|e| path_str.starts_with(e.trim_end_matches('*').trim_end_matches('/')));
+    if !excluded {
+        return false;
+    }
+    if !filter.include.is_empty() {
+        let included = filter
+            .include
+            .iter()
+            .any(|i| path_str.starts_with(i.trim_end_matches('*').trim_end_matches('/')));
+        if included {
+            return false;
+        }
+    }
+    true
+}
 
 /// Regex to find existing wikilinks (to avoid double-linking).
 static EXISTING_LINK_RE: LazyLock<Regex> =
@@ -17,10 +58,20 @@ static EXISTING_LINK_RE: LazyLock<Regex> =
 pub fn lint_linking(notes: &[Note], config: &LinkingConfig) -> Report {
     let mut report = Report::default();
 
-    // Build entity lists from config + note titles
+    // Build entity lists from config + note titles, filtering by target rules
     let note_titles: Vec<(String, String)> = notes
         .iter()
         .filter_map(|n| {
+            // Filter by type
+            if let Some(ref note_type) = n.frontmatter.note_type
+                && is_filtered(note_type, &config.targets.types)
+            {
+                return None;
+            }
+            // Filter by path
+            if is_path_filtered(&n.path, &config.targets.paths) {
+                return None;
+            }
             let stem = n.path.file_stem()?.to_str()?.to_string();
             let title = n.frontmatter.title.clone().unwrap_or_else(|| stem.clone());
             // Skip notes with empty titles (e.g. template stubs)
@@ -50,7 +101,7 @@ pub fn lint_linking(notes: &[Note], config: &LinkingConfig) -> Report {
                 }
 
                 // Check if the title or stem appears in the body (case-insensitive)
-                if let Some(context) = find_mention(&note.body, title, stem) {
+                if let Some(context) = find_mention(&note.body, title, stem, config.min_word_length) {
                     report.add(Violation {
                         path: note.path.clone(),
                         rule: "linking.concept".to_string(),
@@ -71,7 +122,7 @@ pub fn lint_linking(notes: &[Note], config: &LinkingConfig) -> Report {
                 if existing_links.contains(&person.to_lowercase()) {
                     continue;
                 }
-                if let Some(context) = find_mention(&note.body, person, person) {
+                if let Some(context) = find_mention(&note.body, person, person, config.min_word_length) {
                     report.add(Violation {
                         path: note.path.clone(),
                         rule: "linking.person".to_string(),
@@ -92,7 +143,7 @@ pub fn lint_linking(notes: &[Note], config: &LinkingConfig) -> Report {
                 if existing_links.contains(&project.to_lowercase()) {
                     continue;
                 }
-                if let Some(context) = find_mention(&note.body, project, project) {
+                if let Some(context) = find_mention(&note.body, project, project, config.min_word_length) {
                     report.add(Violation {
                         path: note.path.clone(),
                         rule: "linking.project".to_string(),
@@ -158,13 +209,13 @@ fn extract_existing_links(body: &str) -> HashSet<String> {
 
 /// Find a case-insensitive mention of a term in body text.
 /// Returns surrounding context if found.
-fn find_mention(body: &str, title: &str, stem: &str) -> Option<String> {
+fn find_mention(body: &str, title: &str, stem: &str, min_len: usize) -> Option<String> {
     let body_lower = body.to_lowercase();
 
     // Try title first, then stem
     for term in [title, stem] {
         let term_lower = term.to_lowercase();
-        if term_lower.len() < 3 {
+        if term_lower.len() < min_len {
             continue;
         }
 

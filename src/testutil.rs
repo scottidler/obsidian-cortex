@@ -279,6 +279,8 @@ impl TestVault {
                         people: vec!["John Smith".to_string()],
                         projects: vec!["obsidian-cortex".to_string()],
                     },
+                    targets: Default::default(),
+                    min_word_length: 3,
                 },
                 intel: IntelConfig {
                     daily_note: true,

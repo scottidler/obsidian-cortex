@@ -178,6 +178,9 @@ pub struct LinkingConfig {
     #[serde(rename = "scan-for")]
     pub scan_for: Vec<String>,
     pub entities: LinkingEntities,
+    pub targets: LinkingTargets,
+    #[serde(rename = "min-word-length")]
+    pub min_word_length: usize,
 }
 
 impl Default for LinkingConfig {
@@ -185,6 +188,8 @@ impl Default for LinkingConfig {
         Self {
             scan_for: vec!["people".to_string(), "projects".to_string(), "concepts".to_string()],
             entities: LinkingEntities::default(),
+            targets: LinkingTargets::default(),
+            min_word_length: 5,
         }
     }
 }
@@ -194,6 +199,20 @@ impl Default for LinkingConfig {
 pub struct LinkingEntities {
     pub people: Vec<String>,
     pub projects: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct LinkingTargets {
+    pub types: LinkingFilter,
+    pub paths: LinkingFilter,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct LinkingFilter {
+    pub exclude: Vec<String>,
+    pub include: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
