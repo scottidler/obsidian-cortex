@@ -1,9 +1,9 @@
+use chrono::Datelike;
 use eyre::{Context, Result};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 use tracing::instrument;
 
 use crate::cli::DaemonOpts;
@@ -33,7 +33,7 @@ impl SweepFingerprint {
 
 /// Run the daemon based on subcommand options.
 #[instrument(skip(config, opts), fields(vault_root = %vault_root.display()))]
-pub fn run_daemon(vault_root: &Path, config: &Config, opts: &DaemonOpts) -> Result<()> {
+pub async fn run_daemon(vault_root: &Path, config: &Config, opts: &DaemonOpts) -> Result<()> {
     if opts.install {
         install_systemd_service(vault_root, config)?;
     } else if opts.uninstall {
@@ -44,15 +44,16 @@ pub fn run_daemon(vault_root: &Path, config: &Config, opts: &DaemonOpts) -> Resu
         println!("Send SIGTERM to the running daemon process to stop it.");
     } else {
         // Default: start watching (--start or no flags)
-        start_watching(vault_root, config)?;
+        start_watching(vault_root, config).await?;
     }
     Ok(())
 }
 
-/// Start filesystem watcher and run actions on changes.
-fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
+/// Start filesystem watcher and run actions on changes using async tokio::select! loop.
+async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     let daemon_config = &config.daemon;
-    let debounce = Duration::from_secs(daemon_config.debounce_secs);
+    let debounce_duration = Duration::from_secs(daemon_config.debounce_secs);
+    let poll_interval = Duration::from_secs(daemon_config.poll_interval);
 
     let action_names: Vec<&str> = daemon_config.enabled_actions();
     let any_enabled = daemon_config.actions.values().any(|a| a.enable);
@@ -65,19 +66,13 @@ fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
         if any_enabled { " (auto-apply enabled)" } else { "" },
     );
 
-    // Flag to suppress events during auto-apply to prevent feedback loops.
-    let applying = Arc::new(AtomicBool::new(false));
-    let applying_clone = Arc::clone(&applying);
-
-    let (tx, rx) = mpsc::channel();
+    // Channel for file watcher events -> async event loop
+    let (watch_tx, mut watch_rx) = tokio::sync::mpsc::unbounded_channel();
 
     let mut watcher: RecommendedWatcher =
         notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-            if applying_clone.load(Ordering::Relaxed) {
-                return; // Discard events during auto-apply
-            }
             if let Ok(event) = res {
-                let _ = tx.send(event);
+                let _ = watch_tx.send(event);
             }
         })
         .context("failed to create filesystem watcher")?;
@@ -88,77 +83,70 @@ fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
 
     tracing::info!(vault_root = %vault_root.display(), "daemon started");
 
-    let mut last_run = Instant::now() - debounce; // Allow immediate first run
-    let mut last_sweep = Instant::now(); // First sweep after poll_interval
-    let poll_interval = Duration::from_secs(daemon_config.poll_interval);
-    let mut pending_changes: Vec<PathBuf> = Vec::new();
+    // Timers
+    let mut sweep_interval = tokio::time::interval(poll_interval);
+    sweep_interval.tick().await; // consume the immediate first tick
+
+    // Debounce: starts inert (far future), reset when events arrive
+    let debounce = tokio::time::sleep(Duration::MAX);
+    tokio::pin!(debounce);
+
+    let mut pending: Vec<PathBuf> = Vec::new();
 
     // Run a full sweep on startup
     tracing::info!("running initial full sweep");
-    applying.store(true, Ordering::Relaxed);
     let mut last_fingerprint = run_configured_actions(vault_root, config, daemon_config, &[]);
-    applying.store(false, Ordering::Relaxed);
 
     loop {
-        match rx.recv_timeout(Duration::from_secs(1)) {
-            Ok(event) => {
+        tokio::select! {
+            Some(event) = watch_rx.recv() => {
                 if should_process_event(&event, &config.vault.ignore) {
                     // Real user edit - reset cycle detection
                     last_fingerprint = SweepFingerprint::default();
                     for path in event.paths {
                         if path.extension().and_then(|e| e.to_str()) == Some("md") {
                             let relative = path.strip_prefix(vault_root).unwrap_or(&path).to_path_buf();
-                            if !pending_changes.contains(&relative) {
-                                pending_changes.push(relative);
+                            if !pending.contains(&relative) {
+                                pending.push(relative);
                             }
                         }
                     }
+                    // Reset debounce timer
+                    debounce.as_mut().reset(Instant::now() + debounce_duration);
                 }
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                // Check if we should flush pending changes or run periodic sweep
+            () = &mut debounce, if !pending.is_empty() => {
+                // Debounce fired - process pending changes
+                tracing::info!(changed_files = pending.len(), "processing changes");
+                for path in &pending {
+                    println!("  changed: {}", path.display());
+                }
+                let fingerprint = run_configured_actions(vault_root, config, daemon_config, &pending);
+                last_fingerprint = fingerprint;
+                pending.clear();
+                // Make debounce inert again
+                debounce.as_mut().reset(Instant::now() + Duration::MAX);
+                // Reset sweep interval after processing changes
+                sweep_interval.reset();
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                tracing::warn!("watcher channel disconnected");
+            _ = sweep_interval.tick() => {
+                // Periodic full sweep with cycle detection
+                tracing::info!("running periodic sweep");
+                let fingerprint = run_configured_actions(vault_root, config, daemon_config, &[]);
+
+                if !fingerprint.is_empty() && fingerprint == last_fingerprint {
+                    tracing::warn!(
+                        actions = ?fingerprint.results.iter().map(|(a, f)| format!("{a}: {} files", f.len())).collect::<Vec<_>>(),
+                        "cycle detected: sweep produced same results as previous, backing off"
+                    );
+                }
+                last_fingerprint = fingerprint;
+            }
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("received shutdown signal");
+                println!("\nShutting down daemon...");
                 break;
             }
-        }
-
-        // Debounce: run actions if enough time has passed since last run
-        if !pending_changes.is_empty() && last_run.elapsed() >= debounce {
-            tracing::info!(changed_files = pending_changes.len(), "processing changes");
-
-            for path in &pending_changes {
-                println!("  changed: {}", path.display());
-            }
-
-            applying.store(true, Ordering::Relaxed);
-            let fingerprint = run_configured_actions(vault_root, config, daemon_config, &pending_changes);
-            applying.store(false, Ordering::Relaxed);
-            last_fingerprint = fingerprint;
-            pending_changes.clear();
-            last_run = Instant::now();
-            last_sweep = Instant::now(); // Reset sweep timer after any run
-        }
-
-        // Periodic full sweep
-        if pending_changes.is_empty() && last_sweep.elapsed() >= poll_interval {
-            tracing::info!("running periodic sweep");
-
-            // Cycle detection: check if last sweep produced the same results
-            applying.store(true, Ordering::Relaxed);
-            let fingerprint = run_configured_actions(vault_root, config, daemon_config, &[]);
-            applying.store(false, Ordering::Relaxed);
-
-            if !fingerprint.is_empty() && fingerprint == last_fingerprint {
-                tracing::warn!(
-                    actions = ?fingerprint.results.iter().map(|(a, f)| format!("{a}: {} files", f.len())).collect::<Vec<_>>(),
-                    "cycle detected: sweep produced same results as previous, backing off"
-                );
-            }
-            last_fingerprint = fingerprint;
-            last_sweep = Instant::now();
-            last_run = Instant::now();
         }
     }
 
@@ -421,28 +409,103 @@ fn install_systemd_service(vault_root: &Path, config: &Config) -> Result<()> {
     );
 
     let service_path = service_dir.join("obsidian-cortex.service");
-    std::fs::write(&service_path, service)?;
-
+    std::fs::write(&service_path, &service)?;
     println!("Installed: {}", service_path.display());
-    println!("Run: systemctl --user daemon-reload && systemctl --user enable --now obsidian-cortex");
+
+    // Daily intel timer - runs at 23:00 every day
+    let daily_service = format!(
+        "[Unit]\n\
+         Description=Obsidian Cortex Daily Intel\n\
+         \n\
+         [Service]\n\
+         Type=oneshot\n\
+         ExecStart={binary}{config_flag} --vault {vault} intel --daily\n",
+        binary = binary.display(),
+    );
+
+    let daily_timer = "[Unit]\n\
+         Description=Obsidian Cortex Daily Intel Timer\n\
+         \n\
+         [Timer]\n\
+         OnCalendar=*-*-* 23:00:00\n\
+         Persistent=true\n\
+         \n\
+         [Install]\n\
+         WantedBy=timers.target\n";
+
+    let daily_svc_path = service_dir.join("obsidian-cortex-daily.service");
+    let daily_timer_path = service_dir.join("obsidian-cortex-daily.timer");
+    std::fs::write(&daily_svc_path, daily_service)?;
+    std::fs::write(&daily_timer_path, daily_timer)?;
+    println!("Installed: {}", daily_svc_path.display());
+    println!("Installed: {}", daily_timer_path.display());
+
+    // Weekly intel timer - runs Sunday at 22:00
+    let weekly_service = format!(
+        "[Unit]\n\
+         Description=Obsidian Cortex Weekly Intel\n\
+         \n\
+         [Service]\n\
+         Type=oneshot\n\
+         ExecStart={binary}{config_flag} --vault {vault} intel --weekly\n",
+        binary = binary.display(),
+    );
+
+    let weekly_timer = "[Unit]\n\
+         Description=Obsidian Cortex Weekly Intel Timer\n\
+         \n\
+         [Timer]\n\
+         OnCalendar=Sun *-*-* 22:00:00\n\
+         Persistent=true\n\
+         \n\
+         [Install]\n\
+         WantedBy=timers.target\n";
+
+    let weekly_svc_path = service_dir.join("obsidian-cortex-weekly.service");
+    let weekly_timer_path = service_dir.join("obsidian-cortex-weekly.timer");
+    std::fs::write(&weekly_svc_path, weekly_service)?;
+    std::fs::write(&weekly_timer_path, weekly_timer)?;
+    println!("Installed: {}", weekly_svc_path.display());
+    println!("Installed: {}", weekly_timer_path.display());
+
+    println!("\nRun:");
+    println!("  systemctl --user daemon-reload");
+    println!("  systemctl --user enable --now obsidian-cortex");
+    println!("  systemctl --user enable --now obsidian-cortex-daily.timer");
+    println!("  systemctl --user enable --now obsidian-cortex-weekly.timer");
 
     Ok(())
 }
 
-/// Uninstall the systemd user service.
+/// Uninstall the systemd user service and timer units.
 fn uninstall_systemd_service() -> Result<()> {
-    let service_path = dirs::config_dir()
+    let service_dir = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("~/.config"))
         .join("systemd")
-        .join("user")
-        .join("obsidian-cortex.service");
+        .join("user");
 
-    if service_path.exists() {
-        std::fs::remove_file(&service_path)?;
-        println!("Removed: {}", service_path.display());
+    let units = [
+        "obsidian-cortex.service",
+        "obsidian-cortex-daily.service",
+        "obsidian-cortex-daily.timer",
+        "obsidian-cortex-weekly.service",
+        "obsidian-cortex-weekly.timer",
+    ];
+
+    let mut removed = false;
+    for unit in &units {
+        let path = service_dir.join(unit);
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+            println!("Removed: {}", path.display());
+            removed = true;
+        }
+    }
+
+    if removed {
         println!("Run: systemctl --user daemon-reload");
     } else {
-        println!("No service file found at {}", service_path.display());
+        println!("No service files found");
     }
 
     Ok(())
@@ -464,6 +527,68 @@ fn show_status() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Compute Duration until next occurrence of "HH:MM" today or tomorrow.
+pub fn duration_until_daily(time_str: &str) -> Duration {
+    let now = chrono::Local::now();
+    let parts: Vec<&str> = time_str.split(':').collect();
+    let hour: u32 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(23);
+    let minute: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+    let today_target = now.date_naive().and_hms_opt(hour, minute, 0).expect("valid time");
+    let today_target = today_target
+        .and_local_timezone(chrono::Local)
+        .single()
+        .expect("valid local time");
+
+    if today_target > now {
+        (today_target - now).to_std().unwrap_or(Duration::from_secs(3600))
+    } else {
+        let tomorrow_target = today_target + chrono::Duration::days(1);
+        (tomorrow_target - now).to_std().unwrap_or(Duration::from_secs(3600))
+    }
+}
+
+/// Compute Duration until next occurrence of "Day HH:MM" (e.g., "Sun 22:00").
+pub fn duration_until_weekly(schedule_str: &str) -> Duration {
+    let now = chrono::Local::now();
+    let parts: Vec<&str> = schedule_str.split_whitespace().collect();
+    let day_str = parts.first().copied().unwrap_or("Sun");
+    let time_str = parts.get(1).copied().unwrap_or("22:00");
+
+    let target_weekday = match day_str.to_lowercase().as_str() {
+        "mon" => chrono::Weekday::Mon,
+        "tue" => chrono::Weekday::Tue,
+        "wed" => chrono::Weekday::Wed,
+        "thu" => chrono::Weekday::Thu,
+        "fri" => chrono::Weekday::Fri,
+        "sat" => chrono::Weekday::Sat,
+        _ => chrono::Weekday::Sun,
+    };
+
+    let time_parts: Vec<&str> = time_str.split(':').collect();
+    let hour: u32 = time_parts.first().and_then(|s| s.parse().ok()).unwrap_or(22);
+    let minute: u32 = time_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+    let current_weekday = now.weekday();
+    let days_ahead =
+        (target_weekday.num_days_from_monday() as i64 - current_weekday.num_days_from_monday() as i64 + 7) % 7;
+
+    let target_date = now.date_naive() + chrono::Duration::days(days_ahead);
+    let target_time = target_date.and_hms_opt(hour, minute, 0).expect("valid time");
+    let target = target_time
+        .and_local_timezone(chrono::Local)
+        .single()
+        .expect("valid local time");
+
+    if target > now {
+        (target - now).to_std().unwrap_or(Duration::from_secs(3600))
+    } else {
+        // Same day but time already passed - next week
+        let next_week = target + chrono::Duration::weeks(1);
+        (next_week - now).to_std().unwrap_or(Duration::from_secs(3600))
+    }
 }
 
 #[cfg(test)]
@@ -588,5 +713,66 @@ mod tests {
             attrs: Default::default(),
         };
         assert!(!should_process_event(&event, &[]));
+    }
+
+    #[test]
+    fn test_duration_until_daily_future_today() {
+        // If we ask for a time that hasn't passed yet today, it should be today
+        let now = chrono::Local::now();
+        let future_hour = (now.format("%H").to_string().parse::<u32>().unwrap_or(0) + 1) % 24;
+        let time_str = format!("{future_hour:02}:00");
+        let dur = duration_until_daily(&time_str);
+        // Should be less than 24 hours
+        assert!(dur < Duration::from_secs(24 * 3600));
+        assert!(dur > Duration::ZERO);
+    }
+
+    #[test]
+    fn test_duration_until_daily_already_passed() {
+        // If we ask for a time that already passed, it should be tomorrow
+        let now = chrono::Local::now();
+        let past_hour = if now.format("%H").to_string().parse::<u32>().unwrap_or(0) > 0 {
+            now.format("%H").to_string().parse::<u32>().unwrap_or(0) - 1
+        } else {
+            23
+        };
+        let time_str = format!("{past_hour:02}:00");
+        let dur = duration_until_daily(&time_str);
+        // Should be between ~23 hours and ~24 hours from now
+        assert!(dur > Duration::from_secs(22 * 3600));
+        assert!(dur <= Duration::from_secs(24 * 3600));
+    }
+
+    #[test]
+    fn test_duration_until_weekly_returns_valid_duration() {
+        let dur = duration_until_weekly("Sun 22:00");
+        // Should be within 7 days
+        assert!(dur <= Duration::from_secs(7 * 24 * 3600));
+        assert!(dur > Duration::ZERO);
+    }
+
+    #[test]
+    fn test_duration_until_weekly_all_days() {
+        for day in &["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] {
+            let schedule = format!("{day} 12:00");
+            let dur = duration_until_weekly(&schedule);
+            assert!(dur <= Duration::from_secs(7 * 24 * 3600), "failed for {day}");
+            assert!(dur > Duration::ZERO, "failed for {day}");
+        }
+    }
+
+    #[test]
+    fn test_daemon_config_deserialize_schedule_fields() {
+        let yaml = "daily-at: \"23:00\"\nweekly-on: \"Sun 22:00\"\n";
+        let config: DaemonConfig = serde_yaml::from_str(yaml).expect("deserialize");
+        assert_eq!(config.daily_at.as_deref(), Some("23:00"));
+        assert_eq!(config.weekly_on.as_deref(), Some("Sun 22:00"));
+    }
+
+    #[test]
+    fn test_daemon_config_default_no_schedule() {
+        let config = DaemonConfig::default();
+        assert!(config.daily_at.is_none());
+        assert!(config.weekly_on.is_none());
     }
 }

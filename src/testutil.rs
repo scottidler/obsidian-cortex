@@ -296,6 +296,7 @@ impl TestVault {
                 duplicates: DuplicatesConfig {
                     threshold: 0.85,
                     same_type_only: false,
+                    exclude: Vec::new(),
                 },
                 broken_links: BrokenLinksConfig {
                     check_wikilinks: true,

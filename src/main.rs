@@ -9,7 +9,8 @@ use obsidian_cortex::cli::{self, Cli, Command};
 use obsidian_cortex::config::Config;
 use obsidian_cortex::logging;
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     // Augment clap with runtime after_help (tool checks + log path) before parsing
     let matches = Cli::command().after_help(cli::after_help_text()).get_matches();
     let cli = Cli::from_arg_matches(&matches).context("failed to parse arguments")?;
@@ -40,7 +41,7 @@ fn main() -> Result<()> {
             obsidian_cortex::run_state(&vault_root, &config, opts)?;
         }
         Command::Daemon(opts) => {
-            obsidian_cortex::daemon::run_daemon(&vault_root, &config, opts)?;
+            obsidian_cortex::daemon::run_daemon(&vault_root, &config, opts).await?;
         }
         Command::Migrate(opts) => {
             obsidian_cortex::run_migrate(&vault_root, &config, opts)?;

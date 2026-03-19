@@ -263,6 +263,7 @@ pub struct DuplicatesConfig {
     pub threshold: f64,
     #[serde(rename = "same-type-only")]
     pub same_type_only: bool,
+    pub exclude: Vec<String>,
 }
 
 impl Default for DuplicatesConfig {
@@ -270,6 +271,7 @@ impl Default for DuplicatesConfig {
         Self {
             threshold: 0.85,
             same_type_only: false,
+            exclude: Vec::new(),
         }
     }
 }
@@ -361,6 +363,10 @@ pub struct DaemonConfig {
     pub watch: String,
     #[serde(rename = "poll-interval")]
     pub poll_interval: u64,
+    #[serde(rename = "daily-at")]
+    pub daily_at: Option<String>,
+    #[serde(rename = "weekly-on")]
+    pub weekly_on: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -391,6 +397,8 @@ impl Default for DaemonConfig {
             debounce_secs: 5,
             watch: "notify".to_string(),
             poll_interval: 300,
+            daily_at: None,
+            weekly_on: None,
         }
     }
 }

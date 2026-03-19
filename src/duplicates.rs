@@ -6,14 +6,51 @@ use crate::config::DuplicatesConfig;
 use crate::report::{Fix, Report, Severity, Violation};
 use crate::vault::Note;
 
+/// Check if a note path matches any of the given glob patterns.
+fn matches_exclude(note: &Note, patterns: &[glob::Pattern]) -> bool {
+    patterns.iter().any(|pat| {
+        let path_str = note.path.to_string_lossy();
+        pat.matches(&path_str)
+            || note
+                .path
+                .file_name()
+                .map(|f| pat.matches(f.to_string_lossy().as_ref()))
+                .unwrap_or(false)
+    })
+}
+
+/// Parse glob pattern strings into glob::Pattern objects.
+fn parse_exclude_patterns(patterns: &[String]) -> Vec<glob::Pattern> {
+    patterns
+        .iter()
+        .filter_map(|p| match glob::Pattern::new(p) {
+            Ok(pat) => Some(pat),
+            Err(e) => {
+                tracing::warn!(pattern = %p, error = %e, "invalid duplicates exclude pattern, skipping");
+                None
+            }
+        })
+        .collect()
+}
+
 /// Run duplicate detection on all notes.
 #[instrument(skip(notes, config))]
 pub fn lint_duplicates(notes: &[Note], config: &DuplicatesConfig) -> Report {
     let mut report = Report::default();
 
+    // Filter out excluded paths
+    let exclude_patterns = parse_exclude_patterns(&config.exclude);
+    let eligible: Vec<usize> = notes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| !matches_exclude(n, &exclude_patterns))
+        .map(|(i, _)| i)
+        .collect();
+
     // Phase 1: exact content hash duplicates
     let mut hash_groups: HashMap<u64, Vec<usize>> = HashMap::new();
-    for (i, note) in notes.iter().enumerate() {
+    for &i in &eligible {
+        let note = &notes[i];
         // Skip empty/whitespace-only bodies to avoid false exact duplicates
         if note.body.trim().is_empty() {
             continue;
@@ -72,9 +109,14 @@ pub fn lint_duplicates(notes: &[Note], config: &DuplicatesConfig) -> Report {
     }
 
     // Phase 2: fuzzy similarity (TF-IDF based)
-    if notes.len() > 1 && config.threshold < 1.0 {
-        let similarities = find_similar_notes(notes, config.threshold, config.same_type_only);
-        for (i, j, score) in similarities {
+    // Build a sub-slice of eligible notes for TF-IDF comparison
+    let eligible_notes: Vec<Note> = eligible.iter().map(|&i| notes[i].clone()).collect();
+    if eligible_notes.len() > 1 && config.threshold < 1.0 {
+        let similarities = find_similar_notes(&eligible_notes, config.threshold, config.same_type_only);
+        for (ei, ej, score) in similarities {
+            // Map back to original notes indices
+            let i = eligible[ei];
+            let j = eligible[ej];
             // Skip if already reported as exact duplicate
             let already_reported = report
                 .violations
@@ -348,6 +390,7 @@ mod tests {
         let config = DuplicatesConfig {
             threshold: 0.85,
             same_type_only: false,
+            exclude: Vec::new(),
         };
 
         let report = lint_duplicates(&notes, &config);
@@ -455,6 +498,53 @@ mod tests {
         assert!(
             !content.contains("cortex-duplicate-group:"),
             "stale cortex-duplicate-group field should be removed"
+        );
+    }
+
+    #[test]
+    fn test_excluded_paths_not_flagged_as_duplicates() {
+        use crate::testutil::NoteBuilder;
+
+        let notes = vec![
+            NoteBuilder::new("daily/2024/01/2024-01-25.md")
+                .title("2024-01-25")
+                .body("brushing: false\ntyping: false\nspanish: false")
+                .build(),
+            NoteBuilder::new("daily/2024/01/2024-01-26.md")
+                .title("2024-01-26")
+                .body("brushing: false\ntyping: false\nspanish: false")
+                .build(),
+            NoteBuilder::new("notes/real-dupe-a.md")
+                .title("Real Dupe A")
+                .body("This is identical content for testing.")
+                .build(),
+            NoteBuilder::new("notes/real-dupe-b.md")
+                .title("Real Dupe B")
+                .body("This is identical content for testing.")
+                .build(),
+        ];
+        let config = DuplicatesConfig {
+            threshold: 0.85,
+            same_type_only: false,
+            exclude: vec!["daily/**".to_string()],
+        };
+
+        let report = lint_duplicates(&notes, &config);
+        // Daily notes should NOT be flagged
+        assert!(
+            !report
+                .violations
+                .iter()
+                .any(|v| v.path.to_string_lossy().contains("daily/")),
+            "daily notes should be excluded from duplicate detection"
+        );
+        // Real dupes should still be flagged
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|v| v.path.to_string_lossy().contains("real-dupe")),
+            "non-excluded duplicates should still be detected"
         );
     }
 
