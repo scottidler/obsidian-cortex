@@ -21,6 +21,72 @@ pub fn run_intel(vault_root: &Path, notes: &[Note], config: &IntelConfig, opts: 
     Ok(())
 }
 
+/// Process new/unread notes with Fabric pattern.
+/// Sets cortex-insights in frontmatter and updates status to processed.
+#[instrument(skip(notes, config))]
+pub fn process_new_notes(vault_root: &Path, notes: &[Note], config: &IntelConfig) -> Result<usize> {
+    let pattern = match &config.on_new_note {
+        Some(p) => p.clone(),
+        None => return Ok(0),
+    };
+
+    if !crate::fabric::is_available() {
+        tracing::debug!("fabric not available, skipping new note processing");
+        return Ok(0);
+    }
+
+    let mut processed = 0;
+
+    for note in notes {
+        // Only process unread notes
+        if note.frontmatter.status.as_deref() != Some("unread") {
+            continue;
+        }
+
+        // Skip if already processed
+        if note.frontmatter.extra.contains_key("cortex-insights") {
+            continue;
+        }
+
+        // Skip empty bodies
+        if note.body.trim().is_empty() {
+            continue;
+        }
+
+        let input = crate::fabric::truncate_input(&note.body, config.max_input_tokens);
+        match crate::fabric::run_pattern(&pattern, input, config.fabric_timeout_secs) {
+            Ok(insights) => {
+                let abs_path = vault_root.join(&note.path);
+                let content = std::fs::read_to_string(&abs_path)?;
+
+                // Write cortex-insights and update status
+                let fields = vec![
+                    (
+                        "cortex-insights".to_string(),
+                        serde_yaml::Value::String(insights.trim().to_string()),
+                    ),
+                    ("status".to_string(), serde_yaml::Value::String("processed".to_string())),
+                ];
+
+                if let Some(new_content) = crate::scope::insert_frontmatter_fields(&content, &fields) {
+                    std::fs::write(&abs_path, new_content)?;
+                    tracing::info!(path = %note.path.display(), "processed new note with fabric");
+                    processed += 1;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %note.path.display(),
+                    error = %e,
+                    "failed to process note with fabric"
+                );
+            }
+        }
+    }
+
+    Ok(processed)
+}
+
 /// Generate a daily digest note.
 fn generate_daily_digest(vault_root: &Path, notes: &[Note], config: &IntelConfig, opts: &IntelOpts) -> Result<()> {
     let today = Local::now().format("%Y-%m-%d").to_string();
@@ -89,6 +155,29 @@ fn generate_daily_digest(vault_root: &Path, notes: &[Note], config: &IntelConfig
         notes.len(),
         recent_notes.len()
     ));
+
+    // Fabric enhancement: summarize today's notes
+    if let Some(ref pattern) = config.batch_daily
+        && crate::fabric::is_available()
+        && !recent_notes.is_empty()
+    {
+        let concatenated: String = recent_notes
+            .iter()
+            .map(|n| n.body.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n---\n\n");
+        let input = crate::fabric::truncate_input(&concatenated, config.max_input_tokens);
+        match crate::fabric::run_pattern(pattern, input, config.fabric_timeout_secs) {
+            Ok(summary) => {
+                digest.push_str("\n## AI Summary\n\n");
+                digest.push_str(summary.trim());
+                digest.push('\n');
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "fabric daily summary failed, skipping");
+            }
+        }
+    }
 
     // Write to output path
     let output_path = resolve_output_path(vault_root, config, opts, &format!("daily-{today}.md"));
@@ -179,6 +268,29 @@ fn generate_weekly_review(vault_root: &Path, notes: &[Note], config: &IntelConfi
             review.push_str(&format!("- #{tag} ({count} notes)\n"));
         }
         review.push('\n');
+    }
+
+    // Fabric enhancement: extract wisdom from week's notes
+    if let Some(ref pattern) = config.batch_weekly
+        && crate::fabric::is_available()
+        && !week_notes.is_empty()
+    {
+        let concatenated: String = week_notes
+            .iter()
+            .map(|n| n.body.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n---\n\n");
+        let input = crate::fabric::truncate_input(&concatenated, config.max_input_tokens);
+        match crate::fabric::run_pattern(pattern, input, config.fabric_timeout_secs) {
+            Ok(wisdom) => {
+                review.push_str("## AI Insights\n\n");
+                review.push_str(wisdom.trim());
+                review.push('\n');
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "fabric weekly insights failed, skipping");
+            }
+        }
     }
 
     let output_path = resolve_output_path(vault_root, config, opts, &format!("weekly-{week_str}.md"));
@@ -282,5 +394,22 @@ mod tests {
 
         let path = resolve_output_path(Path::new("/vault"), &config, &opts, "daily-2026-03-16.md");
         assert_eq!(path, PathBuf::from("/vault/ai-output/daily-2026-03-16.md"));
+    }
+
+    #[test]
+    fn test_process_new_notes_skips_without_fabric() {
+        let v = TestVault::new();
+        v.add_note(
+            "unread-note.md",
+            "---\ntitle: Unread Note\ndate: 2026-03-18\ntype: note\ndomain: tech\norigin: assisted\nstatus: unread\ntags: []\n---\nSome content to process.\n",
+        );
+        let notes = v.scan();
+        let config = IntelConfig {
+            on_new_note: None, // Disabled
+            ..Default::default()
+        };
+
+        let count = process_new_notes(v.root(), &notes, &config).expect("process");
+        assert_eq!(count, 0, "should skip when on_new_note is None");
     }
 }

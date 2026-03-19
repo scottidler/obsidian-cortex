@@ -287,6 +287,11 @@ impl TestVault {
                     weekly_review: true,
                     fabric_patterns: vec![],
                     output_path: "ai-output".to_string(),
+                    on_new_note: None,
+                    batch_daily: None,
+                    batch_weekly: None,
+                    max_input_tokens: 50000,
+                    fabric_timeout_secs: 30,
                 },
                 duplicates: DuplicatesConfig {
                     threshold: 0.85,

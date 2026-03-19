@@ -227,6 +227,16 @@ pub struct IntelConfig {
     pub fabric_patterns: Vec<String>,
     #[serde(rename = "output-path")]
     pub output_path: String,
+    #[serde(rename = "on-new-note")]
+    pub on_new_note: Option<String>,
+    #[serde(rename = "batch-daily")]
+    pub batch_daily: Option<String>,
+    #[serde(rename = "batch-weekly")]
+    pub batch_weekly: Option<String>,
+    #[serde(rename = "max-input-tokens")]
+    pub max_input_tokens: usize,
+    #[serde(rename = "fabric-timeout-secs")]
+    pub fabric_timeout_secs: u64,
 }
 
 impl Default for IntelConfig {
@@ -236,6 +246,11 @@ impl Default for IntelConfig {
             weekly_review: true,
             fabric_patterns: vec!["extract_wisdom".to_string(), "summarize".to_string()],
             output_path: "system/ai-output".to_string(),
+            on_new_note: Some("extract_wisdom".to_string()),
+            batch_daily: Some("summarize".to_string()),
+            batch_weekly: Some("extract_wisdom".to_string()),
+            max_input_tokens: 50000,
+            fabric_timeout_secs: 30,
         }
     }
 }
