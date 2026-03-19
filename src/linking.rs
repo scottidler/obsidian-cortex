@@ -255,21 +255,36 @@ fn find_mention(body: &str, title: &str, stem: &str, min_len: usize) -> Option<S
 }
 
 /// Insert a wikilink at the first mention of a target in content.
+/// Only searches the body (after frontmatter) to avoid corrupting YAML fields.
 fn insert_first_wikilink(content: &str, target: &str) -> Option<String> {
+    // Find the end of frontmatter so we only search the body
+    let body_start = if content.starts_with("---") {
+        content[3..]
+            .find("\n---")
+            .map(|pos| pos + 3 + "\n---".len())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    let body = &content[body_start..];
     let pattern = format!(r"(?i)\b{}\b", regex::escape(target));
     let re = Regex::new(&pattern).ok()?;
 
-    // Only replace the first occurrence
-    if let Some(mat) = re.find(content) {
-        let before = &content[..mat.start()];
-        let matched = &content[mat.start()..mat.end()];
+    // Only replace the first occurrence in the body
+    if let Some(mat) = re.find(body) {
+        let abs_start = body_start + mat.start();
+        let abs_end = body_start + mat.end();
+
+        let before = &content[..abs_start];
+        let matched = &content[abs_start..abs_end];
 
         // Don't insert if already inside a wikilink
-        if before.ends_with("[[") || content[mat.end()..].starts_with("]]") {
+        if before.ends_with("[[") || content[abs_end..].starts_with("]]") {
             return None;
         }
 
-        let after = &content[mat.end()..];
+        let after = &content[abs_end..];
         Some(format!("{before}[[{matched}]]{after}"))
     } else {
         None
@@ -341,6 +356,26 @@ mod tests {
         let result = result.expect("should have result");
         assert!(result.starts_with("Working on [[obsidian-cortex]]"));
         assert_eq!(result.matches("[[").count(), 1);
+    }
+
+    #[test]
+    fn test_insert_first_wikilink_skips_frontmatter() {
+        let content = "---\ntitle: i replaced commands with one python script\ntype: article\n---\n\nThis article about python is great.";
+        let result = insert_first_wikilink(content, "python");
+        assert!(result.is_some());
+        let result = result.expect("should have result");
+        // Must NOT modify frontmatter title
+        assert!(result.contains("title: i replaced commands with one python script"));
+        // Must wrap the body occurrence
+        assert!(result.contains("about [[python]] is"));
+    }
+
+    #[test]
+    fn test_insert_first_wikilink_no_frontmatter() {
+        let content = "Just a body with python mentioned.";
+        let result = insert_first_wikilink(content, "python");
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("[[python]]"));
     }
 
     #[test]
