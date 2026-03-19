@@ -366,7 +366,7 @@ pub struct DaemonConfig {
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
 pub struct DaemonAction {
-    pub apply: bool,
+    pub enable: bool,
 }
 
 impl DaemonConfig {
@@ -375,17 +375,17 @@ impl DaemonConfig {
         self.actions.keys().map(|s| s.as_str()).collect()
     }
 
-    /// Check whether a given action should auto-apply.
-    pub fn should_apply(&self, action: &str) -> bool {
-        self.actions.get(action).is_some_and(|a| a.apply)
+    /// Check whether a given action is enabled.
+    pub fn is_enabled(&self, action: &str) -> bool {
+        self.actions.get(action).is_some_and(|a| a.enable)
     }
 }
 
 impl Default for DaemonConfig {
     fn default() -> Self {
         let mut actions = HashMap::new();
-        actions.insert("lint".to_string(), DaemonAction { apply: false });
-        actions.insert("broken-links".to_string(), DaemonAction { apply: false });
+        actions.insert("lint".to_string(), DaemonAction { enable: false });
+        actions.insert("broken-links".to_string(), DaemonAction { enable: false });
         Self {
             actions,
             debounce_secs: 5,

@@ -55,14 +55,14 @@ fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     let debounce = Duration::from_secs(daemon_config.debounce_secs);
 
     let action_names: Vec<&str> = daemon_config.enabled_actions();
-    let any_auto_apply = daemon_config.actions.values().any(|a| a.apply);
+    let any_enabled = daemon_config.actions.values().any(|a| a.enable);
 
     println!("Starting daemon, watching: {}", vault_root.display());
     println!(
         "Debounce: {}s, actions: {}{}",
         daemon_config.debounce_secs,
         action_names.join(", "),
-        if any_auto_apply { " (auto-apply enabled)" } else { "" },
+        if any_enabled { " (auto-apply enabled)" } else { "" },
     );
 
     // Flag to suppress events during auto-apply to prevent feedback loops.
@@ -199,7 +199,7 @@ fn run_configured_actions(
     for action in &action_names {
         match *action {
             "lint" => {
-                let auto = daemon_config.should_apply("lint");
+                let auto = daemon_config.is_enabled("lint");
                 let opts = crate::cli::LintOpts {
                     apply: auto,
                     format: "human".to_string(),
@@ -239,7 +239,7 @@ fn run_configured_actions(
                 }
             }
             "link" => {
-                let auto = daemon_config.should_apply("link");
+                let auto = daemon_config.is_enabled("link");
                 let opts = crate::cli::LinkOpts {
                     apply: auto,
                     scan: "all".to_string(),
@@ -264,7 +264,7 @@ fn run_configured_actions(
                 }
             }
             "duplicates" => {
-                let auto = daemon_config.should_apply("duplicates");
+                let auto = daemon_config.is_enabled("duplicates");
                 match crate::vault::scan_vault(vault_root, &config.vault) {
                     Ok(notes) => {
                         if auto {
@@ -294,7 +294,7 @@ fn run_configured_actions(
                 }
             }
             "auto-tag" => {
-                let auto = daemon_config.should_apply("auto-tag");
+                let auto = daemon_config.is_enabled("auto-tag");
                 match crate::vault::scan_vault(vault_root, &config.vault) {
                     Ok(notes) => {
                         if auto {
@@ -324,7 +324,7 @@ fn run_configured_actions(
                 }
             }
             "quality" => {
-                let auto = daemon_config.should_apply("quality");
+                let auto = daemon_config.is_enabled("quality");
                 match crate::vault::scan_vault(vault_root, &config.vault) {
                     Ok(notes) => {
                         if auto {
@@ -472,28 +472,28 @@ mod tests {
     use crate::config::DaemonConfig;
 
     #[test]
-    fn test_should_apply_default_is_false() {
+    fn test_is_enabled_default_is_false() {
         let config = DaemonConfig::default();
-        assert!(!config.should_apply("lint"));
-        assert!(!config.should_apply("link"));
-        assert!(!config.should_apply("nonexistent"));
+        assert!(!config.is_enabled("lint"));
+        assert!(!config.is_enabled("link"));
+        assert!(!config.is_enabled("nonexistent"));
     }
 
     #[test]
-    fn test_should_apply_explicit_true() {
+    fn test_is_enabled_explicit_true() {
         let mut config = DaemonConfig::default();
         config
             .actions
-            .insert("lint".to_string(), crate::config::DaemonAction { apply: true });
-        assert!(config.should_apply("lint"));
-        assert!(!config.should_apply("link"));
+            .insert("lint".to_string(), crate::config::DaemonAction { enable: true });
+        assert!(config.is_enabled("lint"));
+        assert!(!config.is_enabled("link"));
     }
 
     #[test]
-    fn test_should_apply_explicit_false() {
+    fn test_is_enabled_explicit_false() {
         let config = DaemonConfig::default();
-        // lint is in default actions but apply defaults to false
-        assert!(!config.should_apply("lint"));
+        // lint is in default actions but enable defaults to false
+        assert!(!config.is_enabled("lint"));
     }
 
     #[test]
@@ -507,13 +507,13 @@ mod tests {
     #[test]
     fn test_daemon_config_deserialize_actions() {
         let yaml =
-            "actions:\n  lint:\n    apply: true\n  broken-links: {}\n  link:\n    apply: false\ndebounce-secs: 10\n";
+            "actions:\n  lint:\n    enable: true\n  broken-links: {}\n  link:\n    enable: false\ndebounce-secs: 10\n";
         let config: DaemonConfig = serde_yaml::from_str(yaml).expect("deserialize");
         assert_eq!(config.debounce_secs, 10);
-        assert!(config.should_apply("lint"));
-        assert!(!config.should_apply("broken-links"));
-        assert!(!config.should_apply("link"));
-        assert!(!config.should_apply("nonexistent"));
+        assert!(config.is_enabled("lint"));
+        assert!(!config.is_enabled("broken-links"));
+        assert!(!config.is_enabled("link"));
+        assert!(!config.is_enabled("nonexistent"));
         assert_eq!(config.actions.len(), 3);
     }
 
