@@ -166,17 +166,17 @@ fn find_mention(body: &str, title: &str, stem: &str) -> Option<String> {
 
         if let Some(pos) = body_lower.find(&term_lower) {
             // Verify it's a word boundary (not inside another word)
-            let before = if pos > 0 { body.as_bytes()[pos - 1] } else { b' ' };
+            let before_char = body[..pos].chars().last().unwrap_or(' ');
             let after_pos = pos + term_lower.len();
-            let after = if after_pos < body.len() { body.as_bytes()[after_pos] } else { b' ' };
+            let after_char = body[after_pos..].chars().next().unwrap_or(' ');
 
-            if before.is_ascii_alphanumeric() || after.is_ascii_alphanumeric() {
+            if before_char.is_ascii_alphanumeric() || after_char.is_ascii_alphanumeric() {
                 continue;
             }
 
-            // Extract context (surrounding 40 chars)
-            let start = pos.saturating_sub(20);
-            let end = (pos + term.len() + 20).min(body.len());
+            // Extract context (surrounding ~20 chars, snapped to char boundaries)
+            let start = body.floor_char_boundary(pos.saturating_sub(20));
+            let end = body.ceil_char_boundary((pos + term.len() + 20).min(body.len()));
             let context = body[start..end].to_string();
             return Some(context);
         }
