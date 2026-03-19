@@ -174,18 +174,20 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
             }
             _ = sweep_interval.tick() => {
                 // Periodic full sweep with cycle detection
-                tracing::info!("running periodic sweep");
-                applying.store(true, Ordering::Relaxed);
-                let fingerprint = run_configured_actions(vault_root, config, daemon_config, &[]);
-                applying.store(false, Ordering::Relaxed);
-
-                if !fingerprint.is_empty() && fingerprint == last_fingerprint {
+                if !last_fingerprint.is_empty() {
                     tracing::warn!(
-                        actions = ?fingerprint.results.iter().map(|(a, f)| format!("{a}: {} files", f.len())).collect::<Vec<_>>(),
-                        "cycle detected: sweep produced same results as previous, backing off"
+                        actions = ?last_fingerprint.results.iter().map(|(a, f)| format!("{a}: {} files", f.len())).collect::<Vec<_>>(),
+                        "cycle detected: previous sweep had fixes, skipping to avoid oscillation"
                     );
+                    // Don't run - last sweep applied fixes, so running again risks repeating them.
+                    // A real user edit will reset last_fingerprint and re-enable sweeps.
+                } else {
+                    tracing::info!("running periodic sweep");
+                    applying.store(true, Ordering::Relaxed);
+                    let fingerprint = run_configured_actions(vault_root, config, daemon_config, &[]);
+                    applying.store(false, Ordering::Relaxed);
+                    last_fingerprint = fingerprint;
                 }
-                last_fingerprint = fingerprint;
             }
             () = &mut daily => {
                 // Scheduled daily intel
