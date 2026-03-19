@@ -67,7 +67,15 @@ fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     tracing::info!(vault_root = %vault_root.display(), "daemon started");
 
     let mut last_run = Instant::now() - debounce; // Allow immediate first run
+    let mut last_sweep = Instant::now(); // First sweep after poll_interval
+    let poll_interval = Duration::from_secs(daemon_config.poll_interval);
     let mut pending_changes: Vec<PathBuf> = Vec::new();
+
+    // Run a full sweep on startup
+    tracing::info!("running initial full sweep");
+    applying.store(true, Ordering::Relaxed);
+    run_configured_actions(vault_root, config, daemon_config, &[]);
+    applying.store(false, Ordering::Relaxed);
 
     loop {
         match rx.recv_timeout(Duration::from_secs(1)) {
@@ -84,7 +92,7 @@ fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                // Check if we should flush pending changes
+                // Check if we should flush pending changes or run periodic sweep
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 tracing::warn!("watcher channel disconnected");
@@ -104,6 +112,17 @@ fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
             run_configured_actions(vault_root, config, daemon_config, &pending_changes);
             applying.store(false, Ordering::Relaxed);
             pending_changes.clear();
+            last_run = Instant::now();
+            last_sweep = Instant::now(); // Reset sweep timer after any run
+        }
+
+        // Periodic full sweep
+        if pending_changes.is_empty() && last_sweep.elapsed() >= poll_interval {
+            tracing::info!("running periodic sweep");
+            applying.store(true, Ordering::Relaxed);
+            run_configured_actions(vault_root, config, daemon_config, &[]);
+            applying.store(false, Ordering::Relaxed);
+            last_sweep = Instant::now();
             last_run = Instant::now();
         }
     }
